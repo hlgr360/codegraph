@@ -1,0 +1,197 @@
+name: Release (fork)
+
+# This fork's release: pushing a tag vX.Y.Z.N (the upstream version plus the
+# fork's number, e.g. v1.6.2.3) builds the native kernel on each platform's
+# own runner, packages every platform's bundle, and publishes the GitHub
+# release the installers and `codegraph upgrade` download from. A manual run
+# builds and uploads the bundles as workflow artifacts only; nothing is
+# published without a tag.
+#
+# Upstream's release.yml also publishes to npm and pushes CHANGELOG commits,
+# so it is disabled in this fork (`gh workflow disable release.yml`) and left
+# untouched, which keeps upstream merges free of conflicts in either file.
+#
+# Before tagging: package.json (and ui/package.json, package-lock.json) carry
+# the matching X.Y.Z+fork.N version; the version job refuses a mismatch.
+
+on:
+  push:
+    tags:
+      - "v*.*.*.*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-fork-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check the tag against package.json
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg=$(node -p "require('./package.json').version")
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "Not a tag ($GITHUB_REF): building only. package.json is $pkg."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="$GITHUB_REF_NAME"
+          if ! [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::tag $tag is not vX.Y.Z.N (the upstream version plus the fork number, e.g. v1.6.2.3)"
+            exit 1
+          fi
+          want="${BASH_REMATCH[1]}+fork.${BASH_REMATCH[2]}"
+          for f in package.json ui/package.json package-lock.json; do
+            have=$(node -p "require('./$f').version")
+            if [ "$have" != "$want" ]; then
+              echo "::error::$f is at $have, but tag $tag needs $want"
+              exit 1
+            fi
+          done
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  # Same matrix as upstream's release.yml: each runner builds its own
+  # platforms' kernels (the vendored grammar C needs the platform toolchain).
+  kernel:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+          - runner: ubuntu-22.04 # oldest glibc runner → widest compatibility
+            targets: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            targets: aarch64-unknown-linux-gnu
+          - runner: windows-latest
+            targets: x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build kernel prebuilds
+        shell: bash
+        run: |
+          for t in ${{ matrix.targets }}; do
+            bash scripts/build-kernel.sh --target "$t"
+          done
+          ls -R codegraph-kernel/prebuilds
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.runner }}
+          path: codegraph-kernel/prebuilds/
+          if-no-files-found: error
+
+  bundle:
+    needs: [version, kernel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Ensure zip/unzip
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip
+
+      - name: Download kernel prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kernel-*
+          merge-multiple: true
+          path: release/kernel/
+
+      - name: Kernel contract + walker-parity gate
+        run: |
+          mkdir -p codegraph-kernel/prebuilds/linux-x64
+          cp release/kernel/linux-x64/codegraph-kernel.node codegraph-kernel/prebuilds/linux-x64/
+          CODEGRAPH_KERNEL_EXPECT=1 npx vitest run __tests__/kernel-*.test.ts
+
+      - name: Build all platform bundles
+        run: |
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
+            bash scripts/build-bundle.sh "$t"
+          done
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            tar -tzf "release/codegraph-$t.tar.gz" | grep -q 'lib/kernel/codegraph-kernel.node' \
+              || { echo "::error::codegraph-$t.tar.gz has no native kernel"; exit 1; }
+          done
+          for t in win32-x64 win32-arm64; do
+            unzip -l "release/codegraph-$t.zip" | grep -q 'lib/kernel/codegraph-kernel.node' \
+              || { echo "::error::codegraph-$t.zip has no native kernel"; exit 1; }
+          done
+          ( cd release && sha256sum codegraph-* > SHA256SUMS && cat SHA256SUMS )
+          ls -lh release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles
+          path: |
+            release/codegraph-*
+            release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [version, bundle]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundles
+          path: release/
+
+      - name: Attest build provenance
+        # Verify a download with: gh attestation verify <file> -R hlgr360/codegraph
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release/codegraph-*
+            release/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Re-running for an existing release refreshes its assets.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/codegraph-* release/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
+          {
+            echo "Fork release of [colbymchenry/codegraph](https://github.com/colbymchenry/codegraph) with PowerBuilder support and UTF-16 source files."
+            echo
+            echo '```sh'
+            echo "# macOS / Linux"
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
+            echo "# Windows (PowerShell)"
+            echo "irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.ps1 | iex"
+            echo '```'
+            echo
+            echo "Already on a fork release? Run \`codegraph upgrade\`."
+          } > notes.md
+          gh release create "$TAG" release/codegraph-* release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$TAG (fork)" \
+            --notes-file notes.md \
+            --generate-notes

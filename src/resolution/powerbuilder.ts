@@ -19,11 +19,12 @@
  *    inherits. Where T is instead an instance variable of the caller's class
  *    chain, or a global variable (`gnv_app`), its declared type is used.
  * 4. A call through a receiver whose type none of that tells — a variable
- *    declared in an object outside the index — links only a method no other
- *    project method shares the name of.
+ *    declared in an object outside the index — links only a method of the one
+ *    class that declares that name.
  *
- * Overloads are not told apart by their arguments; a call links the first
- * overload its class declares. Built-in functions (`IsValid`, `MessageBox`)
+ * Overloads are told apart by how many arguments the call passes (read off
+ * the call site), the nearest class's first; overloads taking the same number
+ * of arguments are not, and the first one declared wins. Built-in functions (`IsValid`, `MessageBox`)
  * and system classes (`window`, `nonvisualobject`) are not in the index and
  * stay unresolved. Nothing here runs for another language.
  */
@@ -121,6 +122,20 @@ function findType(name: string, fromFile: string, context: ResolutionContext): N
   return types.find((n) => n.filePath === fromFile) ?? types.find((n) => n.isExported) ?? types[0];
 }
 
+/**
+ * The class `cls` is declared `from`. A control or menu item named after its
+ * ancestor (`type u_button from u_button within w_x`) does not inherit from
+ * itself: the ancestor is the other type of that name.
+ */
+function parentOf(cls: Node, context: ResolutionContext): Node | undefined {
+  const parent = ancestorName(cls);
+  if (!parent) return undefined;
+  const found = findType(parent, cls.filePath, context);
+  if (found?.id !== cls.id) return found;
+  const others = pbNodes(parent, context).filter((n) => TYPE_KINDS.has(n.kind) && n.id !== cls.id);
+  return others.find((n) => n.isExported) ?? others[0];
+}
+
 /** `cls` and what it inherits, nearest first. */
 function ancestry(cls: Node, context: ResolutionContext): Node[] {
   return memo(PB_ANCESTRIES, context, cls.id, () => computeAncestry(cls, context));
@@ -131,8 +146,7 @@ function computeAncestry(cls: Node, context: ResolutionContext): Node[] {
   const seen = new Set([cls.id]);
   let current = cls;
   while (chain.length < MAX_ANCESTRY) {
-    const parent = ancestorName(current);
-    const next = parent ? findType(parent, current.filePath, context) : undefined;
+    const next = parentOf(current, context);
     if (!next || seen.has(next.id)) break;
     chain.push(next);
     seen.add(next.id);
@@ -294,7 +308,9 @@ function resolveCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRe
 
   const candidates = pbNodes(method, context).filter((n) => n.kind === 'method');
   const owners = new Set(candidates.map((n) => `${n.filePath}\0${ownerName(n)?.toLowerCase()}`));
-  return owners.size === 1 ? resolved(ref, candidates[0]!, 0.6) : null;
+  if (owners.size !== 1) return null;
+  const overload = pickOverload([...candidates].sort((a, b) => a.startLine - b.startLine), arity);
+  return overload ? resolved(ref, overload, 0.6) : null;
 }
 
 /** Resolve a PowerScript reference; null when the project defines no target. */
@@ -306,14 +322,11 @@ export function matchPowerBuilderRef(ref: UnresolvedRef, context: ResolutionCont
     case 'extends':
     case 'instantiates':
     case 'references': {
-      const type = findType(ref.referenceName, ref.filePath, context);
-      // A class is never its own ancestor: a control `cb_ok` declared
-      // `from cb_ok` names the ancestor of the same name in another file.
-      if (type && ref.referenceKind === 'extends' && type.id === ref.fromNodeId) {
-        const other = pbNodes(ref.referenceName, context).find((n) => TYPE_KINDS.has(n.kind) && n.id !== ref.fromNodeId);
-        return other ? resolved(ref, other, 0.9) : null;
-      }
-      return type ? resolved(ref, type, 0.9) : null;
+      // A class is never its own ancestor (see parentOf).
+      const from = ref.referenceKind === 'extends' ? context.getNodeById?.(ref.fromNodeId) : undefined;
+      const type = (from && TYPE_KINDS.has(from.kind) ? parentOf(from, context) : undefined) ??
+        findType(ref.referenceName, ref.filePath, context);
+      return type && type.id !== ref.fromNodeId ? resolved(ref, type, 0.9) : null;
     }
     default:
       return null;

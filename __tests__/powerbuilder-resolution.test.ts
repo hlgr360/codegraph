@@ -91,6 +91,41 @@ end type
 event clicked;of_save()
 end event
 `,
+    'base.pbl/u_button.sru': `global type u_button from commandbutton
+end type
+global u_button u_button
+
+public subroutine of_flash ();
+end subroutine
+`,
+    'app.pbl/w_named.srw': `global type w_named from window
+u_button u_button
+end type
+global w_named w_named
+
+type u_button from u_button within w_named
+end type
+
+event clicked;of_flash()
+end event
+`,
+    'base.pbl/n_ping.sru': `global type n_ping from nonvisualobject
+end type
+global n_ping n_ping
+
+public function integer of_ping (long al_a);return 1
+end function
+
+public function integer of_ping (long al_a, long al_b);return 2
+end function
+`,
+    'app.pbl/n_pinger.sru': `global type n_pinger from nonvisualobject
+end type
+global n_pinger n_pinger
+
+public subroutine of_go ();lnv_unknown.of_ping(1, 2)
+end subroutine
+`,
     'other.pbl/n_unrelated.sru': `global type n_unrelated from nonvisualobject
 end type
 global n_unrelated n_unrelated
@@ -142,6 +177,19 @@ describe('PowerBuilder resolution', () => {
 
   it("looks outward from a control's script to its window", () => {
     expect(edgesFrom('app.pbl/w_orders.srw', 'calls')).toEqual(['w_orders::of_save', 'w_orders::of_validate']);
+  });
+
+  it('inherits from the other type when a control is named after its ancestor', () => {
+    const control = cg.getNodesInFile('app.pbl/w_named.srw').find((n) => n.kind === 'class' && n.name === 'u_button')!;
+    const ext = cg.getOutgoingEdgesFrom([control.id], ['extends']).map((e) => cg.getNode(e.target)!);
+    expect(ext.map((n) => n.filePath)).toEqual(['base.pbl/u_button.sru']);
+    expect(edgesFrom('app.pbl/w_named.srw', 'calls')).toEqual(['u_button::of_flash']);
+  });
+
+  it('picks the overload by argument count when the receiver type is unknown', () => {
+    const ids = cg.getNodesInFile('app.pbl/n_pinger.sru').map((n) => n.id);
+    const targets = cg.getOutgoingEdgesFrom(ids, ['calls']).map((e) => cg.getNode(e.target)!);
+    expect(targets.map((n) => n.signature)).toEqual(['public function integer of_ping (long al_a, long al_b)']);
   });
 
   it('never links a same-named method of an unrelated object', () => {

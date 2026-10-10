@@ -78,11 +78,13 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hlgr360/codegraph/main/install.sh | sh
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/hlgr360/codegraph/main/install.ps1 | iex
 ```
+
+> **This is the [hlgr360/codegraph](https://github.com/hlgr360/codegraph) fork** of [colbymchenry/codegraph](https://github.com/colbymchenry/codegraph), adding PowerBuilder support and UTF-16 source files. The commands above install the fork's own releases (tagged `vX.Y.Z.N`: the upstream version plus the fork's number), and `codegraph upgrade` keeps following them. To install upstream instead, use the same commands from upstream's repository.
 
 <details>
 <summary><b>Already have Node? Use npm instead (works on any version)</b></summary>
@@ -90,6 +92,8 @@ irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | 
 ```bash
 npm i -g @colbymchenry/codegraph
 ```
+
+<sub>**Note:** the npm package is upstream's, without this fork's changes; use the commands above for the fork.</sub>
 
 <sub>CodeGraph bundles its own runtime — nothing to compile, no native build, works the same everywhere. The installer puts `codegraph` on your PATH but **doesn't change your current shell** — open a new terminal before the next step so the command resolves.</sub>
 
@@ -883,7 +887,7 @@ Framework routing is validated the same way, on a canonical app per framework: E
 
 **MCP hits `database is locked`** — current builds shouldn't: CodeGraph bundles its own Node runtime and uses Node's built-in `node:sqlite` in WAL mode, where concurrent reads never block on a writer. If you still see it:
 
-- **You're on an old (pre-0.9) install.** Reinstall to get the bundled runtime — `curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh` (macOS/Linux), `irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex` (Windows), or `npm i -g @colbymchenry/codegraph@latest`.
+- **You're on an old (pre-0.9) install.** Reinstall to get the bundled runtime — `curl -fsSL https://raw.githubusercontent.com/hlgr360/codegraph/main/install.sh | sh` (macOS/Linux) or `irm https://raw.githubusercontent.com/hlgr360/codegraph/main/install.ps1 | iex` (Windows).
 - **`codegraph status` shows `Journal:` other than `wal`** — WAL couldn't be enabled on this filesystem (common on network shares and WSL2 `/mnt`), so reads can block on writes. Move the project (with its `.codegraph/` folder) onto a local disk.
 
 **MCP server not connecting** — Your agent starts the server itself, so you don't launch it by hand. Make sure the project is initialized and indexed (`codegraph status`) and that the path in your MCP config is correct. If it still won't connect, re-run `codegraph install` to rewrite the config.
