@@ -469,7 +469,7 @@ export async function runUninstaller(opts: RunUninstallerOptions): Promise<void>
     const sel = await clack.select({
       message: 'Remove CodeGraph from all your projects, or just this one?',
       options: [
-        { value: 'global' as const, label: 'All projects (global)', hint: '~/.claude, ~/.cursor, ~/.codex, ~/.config/opencode, ~/.hermes, ~/.gemini, ~/.kiro, ~/.copilot, ~/.config/github-copilot' },
+        { value: 'global' as const, label: 'All projects (global)', hint: '~/.claude, ~/.cursor, ~/.codex, ~/.config/opencode, ~/.hermes, ~/.gemini, ~/.kiro, ~/.copilot, ~/.config/github-copilot, ~/.pi/agent' },
         { value: 'local'  as const, label: 'Just this project (local)', hint: './.claude, ./.cursor, ./.vscode, ./opencode.jsonc, ./.gemini, ./.kiro' },
       ],
       initialValue: 'global' as const,
