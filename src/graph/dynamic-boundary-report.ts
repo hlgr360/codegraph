@@ -26,7 +26,8 @@ import type CodeGraph from '../index';
 import type { Edge, Node } from '../types';
 import { scanDynamicDispatch, type BoundaryMatch } from '../mcp/dynamic-boundaries';
 import { validatePathWithinRoot } from '../utils';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync } from 'fs';
+import { readSourceTextSync } from '../file-limits';
 
 /** Below this resolution confidence an edge is a name-only guess, not a call. */
 export const UNCERTAIN_BELOW = 0.6;
@@ -158,7 +159,7 @@ export function findDynamicBoundaries(
     if (!absPath || !existsSync(absPath)) continue;
     let content: string;
     try {
-      content = readFileSync(absPath, 'utf-8');
+      content = readSourceTextSync(absPath);
     } catch {
       continue;
     }

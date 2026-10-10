@@ -35,7 +35,7 @@ import { declaredDependencies } from '../resolution/frameworks/package-deps';
 import type { ResolutionContext } from '../resolution/types';
 import { createYielder, type MaybeYield } from '../resolution/cooperative-yield';
 import { resurrectRefFromDroppedEdge } from '../resolution/resurrect-ref';
-import { MAX_SOURCE_FILE_SIZE_BYTES, oversizeStamp, readBoundedSource, readBoundedSourceSync } from '../file-limits';
+import { MAX_SOURCE_FILE_SIZE_BYTES, decodeSourceText, oversizeStamp, readBoundedSource, readBoundedSourceSync } from '../file-limits';
 export { oversizeStamp };
 
 /**
@@ -184,7 +184,7 @@ export function hashContent(content: string): string {
 function readSourceOrStamp(fullPath: string): string | null {
   const { stats, bytes } = readBoundedSourceSync(fullPath);
   if (bytes === null) return oversizeStamp(stats.size);
-  return isMpegTsBytes(fullPath, bytes) ? null : bytes.toString('utf8');
+  return isMpegTsBytes(fullPath, bytes) ? null : decodeSourceText(bytes);
 }
 
 /** Whether these bytes, read from `filePath`, are a `.ts` MPEG transport stream (#1910). */
@@ -1932,7 +1932,8 @@ export class ExtractionOrchestrator {
         try {
           // Framework detectors scan source by name; a file over the size
           // limit was never indexed and must not be decoded here either (#1910).
-          return readBoundedSourceSync(full).bytes?.toString('utf8') ?? null;
+          const bytes = readBoundedSourceSync(full).bytes;
+          return bytes ? decodeSourceText(bytes) : null;
         } catch {
           return null;
         }
@@ -2441,7 +2442,7 @@ export class ExtractionOrchestrator {
             if (isMpegTsBytes(fp, bytes)) {
               return { filePath: fp, content: null as string | null, stats: null as fs.Stats | null, error: null as Error | null, skipped: true };
             }
-            const content = bytes.toString('utf-8');
+            const content = decodeSourceText(bytes);
             return { filePath: fp, content, stats, error: null as Error | null };
           } catch (err) {
             return { filePath: fp, content: null as string | null, stats: null as fs.Stats | null, error: err as Error };
@@ -2591,7 +2592,7 @@ export class ExtractionOrchestrator {
           // Bounded like the first read: the file may have grown since (#1910).
           const bytes = (await readBoundedSource(fullPath)).bytes;
           if (bytes === null) continue;
-          content = bytes.toString('utf8');
+          content = decodeSourceText(bytes);
         } catch {
           continue;
         }
@@ -2645,7 +2646,7 @@ export class ExtractionOrchestrator {
             if (!fullPath) continue;
             const bytes = (await readBoundedSource(fullPath)).bytes;
             if (bytes === null) continue;
-            fullContent = bytes.toString('utf8');
+            fullContent = decodeSourceText(bytes);
           } catch {
             continue;
           }
@@ -2784,7 +2785,7 @@ export class ExtractionOrchestrator {
       if (read.bytes !== null && isMpegTsBytes(relativePath, read.bytes)) {
         return { nodes: [], edges: [], unresolvedReferences: [], errors: [], durationMs: 0 };
       }
-      content = read.bytes === null ? oversizeStamp(stats.size) : read.bytes.toString('utf8');
+      content = read.bytes === null ? oversizeStamp(stats.size) : decodeSourceText(read.bytes);
     } catch (error) {
       return {
         nodes: [],

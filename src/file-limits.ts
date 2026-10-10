@@ -31,6 +31,33 @@ export function indexedHashInput(size: number, content: () => string): string {
   return size > MAX_SOURCE_FILE_SIZE_BYTES ? oversizeStamp(size) : content();
 }
 
+/**
+ * A source file's text from its bytes: UTF-16 when the file opens with a
+ * UTF-16 byte-order mark, UTF-8 otherwise. Windows tools write UTF-16 —
+ * PowerBuilder's exports among them — and read as UTF-8 such a file is NULs
+ * between letters, which no grammar parses. The mark is kept as `\uFEFF`, as
+ * a UTF-8 file's is, so a UTF-8 file decodes exactly as before. Everything
+ * that reads a source file to parse, render or hash it decodes through here:
+ * the index stores the hash of this text, and a reader that decoded otherwise
+ * would see every UTF-16 file as changed.
+ */
+export function decodeSourceText(bytes: Buffer): string {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return bytes.toString('utf16le');
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    // Node has no big-endian decoder: swap each pair, then decode as little-endian.
+    const even = bytes.subarray(0, bytes.length - (bytes.length % 2));
+    return Buffer.from(even).swap16().toString('utf16le');
+  }
+  return bytes.toString('utf8');
+}
+
+/** `fs.readFileSync(file, 'utf8')` for a source file, decoded by {@link decodeSourceText}. */
+export function readSourceTextSync(file: string): string {
+  return decodeSourceText(fs.readFileSync(file));
+}
+
 /** A source file's stats, and its bytes when they are within the limit (null = oversize). */
 export interface BoundedSource {
   stats: fs.Stats;

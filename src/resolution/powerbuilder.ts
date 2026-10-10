@@ -1,0 +1,321 @@
+/**
+ * PowerBuilder (PowerScript) reference resolution.
+ *
+ * PowerScript names ignore case, and its objects overload freely (PFC's
+ * `of_getitem` has three bodies in one file), so the name matcher's exact,
+ * case-sensitive and unique-candidate strategies found almost none of a
+ * project's calls. PowerScript's own lookup is simple, and is what this
+ * follows, from what the extractor writes down (see
+ * extraction/languages/powerbuilder.ts):
+ *
+ * 1. A type — `from w_response`, `create n_cst_x`, a variable's declared
+ *    type — is the class or structure of that name, preferring the caller's
+ *    own file (every window declares its own `cb_ok` control).
+ * 2. A call with no receiver (`of_init()`, `this.of_init()`) is a function or
+ *    event of the class whose script makes it, or of what that class inherits
+ *    (`from …`, read off the class's signature), else a global function.
+ * 3. `T.m` where T is a class (the extractor writes `T` for `super::`, an
+ *    explicit ancestor, a control and a local of type T) is T's `m` or one it
+ *    inherits. Where T is instead an instance variable of the caller's class
+ *    chain, or a global variable (`gnv_app`), its declared type is used.
+ * 4. A call through a receiver whose type none of that tells — a variable
+ *    declared in an object outside the index — links only a method no other
+ *    project method shares the name of.
+ *
+ * Overloads are not told apart by their arguments; a call links the first
+ * overload its class declares. Built-in functions (`IsValid`, `MessageBox`)
+ * and system classes (`window`, `nonvisualobject`) are not in the index and
+ * stay unresolved. Nothing here runs for another language.
+ */
+import type { Node } from '../types';
+import type { ResolutionContext, ResolvedRef, UnresolvedRef } from './types';
+
+const LANG = 'powerbuilder';
+const TYPE_KINDS = new Set(['class', 'struct']);
+const VARIABLE_KINDS = new Set(['field', 'variable', 'constant']);
+const MAX_ANCESTRY = 32;
+
+/**
+ * `global type w_x from w_response within w_frame` → `w_response`;
+ * `type m_file from m_master\`m_file within m_frame` → `m_master\`m_file`.
+ */
+function ancestorName(cls: Node): string | undefined {
+  return /\bfrom\s+((?:[\w$#%-]+`)?[\w$#%-]+)/i.exec(cls.signature ?? '')?.[1];
+}
+
+/** `type cb_ok from u_cb within w_main` → the `w_main` of the same file. */
+function containerOf(cls: Node, context: ResolutionContext): Node | undefined {
+  const within = /\bwithin\s+([\w$#%-]+)/i.exec(cls.signature ?? '')?.[1];
+  if (!within) return undefined;
+  const lower = within.toLowerCase();
+  return pbNodes(within, context).find((n) => TYPE_KINDS.has(n.kind) && n.filePath === cls.filePath && n.name.toLowerCase() === lower);
+}
+
+/**
+ * A name a script uses unqualified: the script's class and what it inherits,
+ * then — as PowerScript looks outward from a control's script to its window,
+ * or from a menu item's to its menu — the class it is declared `within`.
+ */
+function memberOutward(cls: Node, name: string, kinds: ReadonlySet<string>, context: ResolutionContext, arity?: Arity): Node | undefined {
+  const seen = new Set<string>();
+  for (let c: Node | undefined = cls; c && !seen.has(c.id); c = containerOf(c, context)) {
+    seen.add(c.id);
+    const member = memberInChain(c, name, kinds, context, arity);
+    if (member) return member;
+  }
+  return undefined;
+}
+
+/** The class a member belongs to: the last `::` segment before its own name. */
+function ownerName(member: Node): string | undefined {
+  const parts = member.qualifiedName.split('::');
+  return parts.length >= 2 ? parts[parts.length - 2] : undefined;
+}
+
+/** `n_cst_x inv_x` / `constant integer X = 0` → the declared type. */
+function declaredType(variable: Node): string | undefined {
+  const words = (variable.signature ?? '').replace(/^constant\s+/i, '').trim().split(/\s+/);
+  return words.length >= 2 ? words[0] : undefined;
+}
+
+/**
+ * Per-resolution-pass memos: every call walks its class chain, and a large
+ * project resolves the same few hundred names and chains thousands of times.
+ * Cleared with the resolver's caches (clearPowerBuilderMemos).
+ */
+const PB_NODES = new WeakMap<ResolutionContext, Map<string, Node[]>>();
+const PB_ANCESTRIES = new WeakMap<ResolutionContext, Map<string, Node[]>>();
+
+function memo<T>(store: WeakMap<ResolutionContext, Map<string, T>>, context: ResolutionContext, key: string, compute: () => T): T {
+  let map = store.get(context);
+  if (!map) store.set(context, (map = new Map()));
+  let value = map.get(key);
+  if (value === undefined) map.set(key, (value = compute()));
+  return value;
+}
+
+export function clearPowerBuilderMemos(context: ResolutionContext): void {
+  PB_NODES.delete(context);
+  PB_ANCESTRIES.delete(context);
+}
+
+function pbNodes(name: string, context: ResolutionContext): Node[] {
+  const lower = name.toLowerCase();
+  return memo(PB_NODES, context, lower, () => context.getNodesByLowerName(lower).filter((n) => n.language === LANG));
+}
+
+/**
+ * The project type named `name`, nearest the caller first. `outer\`inner` is
+ * the control or menu item `inner` declared inside the type `outer`.
+ */
+function findType(name: string, fromFile: string, context: ResolutionContext): Node | undefined {
+  const tick = name.indexOf('`');
+  if (tick > 0) {
+    const outer = findType(name.slice(0, tick), fromFile, context);
+    const inner = name.slice(tick + 1).toLowerCase();
+    return outer
+      ? pbNodes(inner, context).find((n) => TYPE_KINDS.has(n.kind) && n.filePath === outer.filePath && n.name.toLowerCase() === inner)
+      : undefined;
+  }
+  const types = pbNodes(name, context).filter((n) => TYPE_KINDS.has(n.kind));
+  return types.find((n) => n.filePath === fromFile) ?? types.find((n) => n.isExported) ?? types[0];
+}
+
+/** `cls` and what it inherits, nearest first. */
+function ancestry(cls: Node, context: ResolutionContext): Node[] {
+  return memo(PB_ANCESTRIES, context, cls.id, () => computeAncestry(cls, context));
+}
+
+function computeAncestry(cls: Node, context: ResolutionContext): Node[] {
+  const chain: Node[] = [cls];
+  const seen = new Set([cls.id]);
+  let current = cls;
+  while (chain.length < MAX_ANCESTRY) {
+    const parent = ancestorName(current);
+    const next = parent ? findType(parent, current.filePath, context) : undefined;
+    if (!next || seen.has(next.id)) break;
+    chain.push(next);
+    seen.add(next.id);
+    current = next;
+  }
+  return chain;
+}
+
+/** The members of `cls` itself named `name`, in source order (overloads share a name). */
+function ownMembers(cls: Node, name: string, kinds: ReadonlySet<string>, context: ResolutionContext): Node[] {
+  const lower = cls.name.toLowerCase();
+  return pbNodes(name, context)
+    .filter((n) => n.filePath === cls.filePath && kinds.has(n.kind) && ownerName(n)?.toLowerCase() === lower)
+    .sort((a, b) => a.startLine - b.startLine);
+}
+
+const CALLABLE_KINDS = new Set(['method', 'function']);
+
+/** How many arguments a call passes, read lazily — only overloads need it. */
+type Arity = () => number | undefined;
+
+/**
+ * The overload a call means: the nearest one (own class before ancestors)
+ * declaring as many parameters as the call passes, else the nearest one.
+ */
+function pickOverload(candidates: Node[], arity?: Arity): Node | undefined {
+  if (candidates.length <= 1 || !arity) return candidates[0];
+  const passed = arity();
+  return (passed === undefined ? undefined : candidates.find((n) => parameterCount(n) === passed)) ?? candidates[0];
+}
+
+function memberInChain(cls: Node, name: string, kinds: ReadonlySet<string>, context: ResolutionContext, arity?: Arity): Node | undefined {
+  const candidates: Node[] = [];
+  for (const c of ancestry(cls, context)) {
+    candidates.push(...ownMembers(c, name, kinds, context));
+    if (candidates.length > 0 && !arity) break;
+  }
+  return pickOverload(candidates, arity);
+}
+
+/** The arguments between the parentheses that open at `text[open]`, or undefined if they never close. */
+function countArguments(text: string, open: number): number | undefined {
+  let depth = 0;
+  let commas = 0;
+  let quote = '';
+  let any = false;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote) {
+      if (ch === '~') i++; // PowerScript's escape character
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; any = true; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; if (depth > 1) any = true; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      depth--;
+      if (depth === 0) return any ? commas + 1 : 0;
+      continue;
+    }
+    if (depth === 1 && ch === ',') commas++;
+    else if (depth >= 1 && !/[\s&]/.test(ch)) any = true; // `&` continues a line
+  }
+  return undefined;
+}
+
+/** Parameters a function, event or external declares, from its signature. */
+function parameterCount(node: Node): number | undefined {
+  const sig = node.signature ?? '';
+  const open = sig.indexOf('(');
+  return open >= 0 ? countArguments(sig, open) : undefined;
+}
+
+/** Arguments the call at `ref` passes to `method`, read from the source. */
+function callArity(ref: UnresolvedRef, method: string, context: ResolutionContext): number | undefined {
+  const lines = context.getFileLines?.(ref.filePath) ?? context.readFile(ref.filePath)?.split(/\r?\n/);
+  if (!lines) return undefined;
+  const text = lines.slice(ref.line - 1, ref.line + 19).join('\n');
+  const escaped = method.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?:^|[^\\w$#%-])${escaped}\\s*\\(`, 'gi');
+  // The ref's column counts bytes, which run ahead of characters on a line
+  // with non-ASCII text before the call: take the last match starting at or
+  // before it, else the first.
+  let chosen: RegExpExecArray | null = null;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (!chosen || m.index <= ref.column) chosen = m;
+    if (m.index > ref.column) break;
+  }
+  if (!chosen) return undefined;
+  return countArguments(text, chosen.index + chosen[0].length - 1);
+}
+
+/** The class whose script holds `fromNodeId`. */
+function callerClass(ref: UnresolvedRef, context: ResolutionContext): Node | undefined {
+  const caller = context.getNodeById?.(ref.fromNodeId);
+  if (!caller) return undefined;
+  if (TYPE_KINDS.has(caller.kind)) return caller;
+  const owner = ownerName(caller);
+  if (!owner) return undefined;
+  const lower = owner.toLowerCase();
+  return pbNodes(owner, context).find((n) => TYPE_KINDS.has(n.kind) && n.filePath === caller.filePath && n.name.toLowerCase() === lower);
+}
+
+/** The type of a receiver that is a variable: an instance variable of the chain, else a global. */
+function variableType(receiver: string, from: Node | undefined, ref: UnresolvedRef, context: ResolutionContext): Node | undefined {
+  const variable = (from ? memberOutward(from, receiver, VARIABLE_KINDS, context) : undefined) ??
+    pbNodes(receiver, context).find((n) => n.kind === 'variable' && n.isExported);
+  const type = variable ? declaredType(variable) : undefined;
+  return type ? findType(type, variable!.filePath, context) ?? findType(type, ref.filePath, context) : undefined;
+}
+
+function receiverType(links: string[], from: Node | undefined, ref: UnresolvedRef, context: ResolutionContext): Node | undefined {
+  const [first, ...rest] = links;
+  if (!first || first === '?') return undefined;
+  let type = variableType(first, from, ref, context) ?? findType(first, ref.filePath, context);
+  for (const link of rest) {
+    if (!type) return undefined;
+    const field = memberInChain(type, link, VARIABLE_KINDS, context);
+    const declared = field ? declaredType(field) : undefined;
+    type = declared ? findType(declared, field!.filePath, context) : undefined;
+  }
+  return type;
+}
+
+function resolved(ref: UnresolvedRef, target: Node, confidence: number): ResolvedRef {
+  return { original: ref, targetNodeId: target.id, confidence, resolvedBy: 'qualified-name' };
+}
+
+function resolveCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  const name = ref.referenceName;
+  const dot = name.lastIndexOf('.');
+  const receiver = dot > 0 ? name.slice(0, dot) : '';
+  const method = dot > 0 ? name.slice(dot + 1) : name;
+  const from = callerClass(ref, context);
+  let passed: { n: number | undefined } | undefined;
+  const arity: Arity = () => (passed ??= { n: callArity(ref, method, context) }).n;
+
+  if (!receiver) {
+    const member = from ? memberOutward(from, method, CALLABLE_KINDS, context, arity) : undefined;
+    if (member) return resolved(ref, member, 0.9);
+    const globals = pbNodes(method, context).filter((n) => n.kind === 'function')
+      .sort((a, b) => Number(b.filePath === ref.filePath) - Number(a.filePath === ref.filePath) || a.startLine - b.startLine);
+    const global = pickOverload(globals, arity);
+    return global ? resolved(ref, global, 0.8) : null;
+  }
+
+  // A receiver path (`inv_svc`, `lv_1.inv_datasource`) is typed link by link:
+  // the first is a variable seen from the caller or a type, each later one an
+  // instance variable of the type before it. `?` is a receiver the extractor
+  // could not type (a call's result).
+  const type = receiverType(receiver.split('.'), from, ref, context);
+  if (type) {
+    const member = memberInChain(type, method, CALLABLE_KINDS, context, arity);
+    if (member) return resolved(ref, member, 0.9);
+    // A project type's chain that ends in a system class (`u_dw` from
+    // `datawindow`) — the method is that system class's built-in.
+    return null;
+  }
+
+  const candidates = pbNodes(method, context).filter((n) => n.kind === 'method');
+  const owners = new Set(candidates.map((n) => `${n.filePath}\0${ownerName(n)?.toLowerCase()}`));
+  return owners.size === 1 ? resolved(ref, candidates[0]!, 0.6) : null;
+}
+
+/** Resolve a PowerScript reference; null when the project defines no target. */
+export function matchPowerBuilderRef(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  if (ref.language !== LANG) return null;
+  switch (ref.referenceKind) {
+    case 'calls':
+      return resolveCall(ref, context);
+    case 'extends':
+    case 'instantiates':
+    case 'references': {
+      const type = findType(ref.referenceName, ref.filePath, context);
+      // A class is never its own ancestor: a control `cb_ok` declared
+      // `from cb_ok` names the ancestor of the same name in another file.
+      if (type && ref.referenceKind === 'extends' && type.id === ref.fromNodeId) {
+        const other = pbNodes(ref.referenceName, context).find((n) => TYPE_KINDS.has(n.kind) && n.id !== ref.fromNodeId);
+        return other ? resolved(ref, other, 0.9) : null;
+      }
+      return type ? resolved(ref, type, 0.9) : null;
+    }
+    default:
+      return null;
+  }
+}

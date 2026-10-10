@@ -35,6 +35,7 @@ import { resolveProjectFile } from '../security';
 import { findIndexedFile, hasDriftedOnDisk } from './source';
 import { createWhenReader } from './when';
 import { toNodeRef, type WireNodeRef } from './wire';
+import { readSourceTextSync } from '../../file-limits';
 
 // =============================================================================
 // Wire shapes
@@ -595,7 +596,7 @@ function mentionsOf(cg: CodeGraph, projectRoot: string, value: Node): Edge[] {
     try {
       const abs = resolveProjectFile(projectRoot, found.storedPath);
       if (fs.statSync(abs).size > MAX_MENTION_FILE_BYTES) continue;
-      text = fs.readFileSync(abs, 'utf8');
+      text = readSourceTextSync(abs);
     } catch {
       continue;
     }

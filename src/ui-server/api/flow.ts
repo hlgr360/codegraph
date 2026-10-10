@@ -63,7 +63,7 @@ import {
   type WireList,
   type WireNodeRef,
 } from './wire';
-import * as fs from 'fs';
+import { readSourceTextSync } from '../../file-limits';
 
 /** Lines shown either side of the call site on a card (design spec §3.5). */
 export const SOURCE_WINDOW = 3;
@@ -380,7 +380,7 @@ function loadFile(
       // The chokepoint, before anything is opened — see `source.ts`.
       const absolute = resolveProjectFile(projectRoot, found.storedPath);
       entry = {
-        lines: splitLines(fs.readFileSync(absolute, 'utf-8')),
+        lines: splitLines(readSourceTextSync(absolute)),
         language: found.record.language,
         abs: absolute,
         drift: false,

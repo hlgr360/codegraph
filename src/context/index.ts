@@ -29,6 +29,7 @@ import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants, is
 import { LOW_CONFIDENCE_MARKER } from './markers';
 import { findNamedCopybooks, isCopybookInclude } from '../graph/cobol-copybooks';
 import { describeSynthesizedHop } from '../graph/synthesized-hop';
+import { readSourceTextSync } from '../file-limits';
 
 /**
  * Most top-level declarations of one copybook that become entry points — its
@@ -1388,7 +1389,7 @@ export class ContextBuilder {
     }
 
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = readSourceTextSync(filePath);
       const lines = content.split('\n');
 
       // Extract lines (1-indexed to 0-indexed)

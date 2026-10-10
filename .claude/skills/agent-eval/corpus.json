@@ -607,5 +607,28 @@
       "files": "~3390",
       "question": "How does programs.git.enable produce the final git config file in the user's home directory? Trace the flow from the git program module to the home-files machinery that links generated files into place."
     }
+  ],
+  "PowerBuilder": [
+    {
+      "name": "pb-exception-framework",
+      "repo": "https://github.com/informaticon/pb-exception-framework",
+      "size": "Small",
+      "files": "~49",
+      "question": "When application code catches an exception and calls gu_e.of_display(), how does the Exception Framework turn that throwable into the error message window the user sees? Trace from u_exf_error_manager.of_display through the application adapter to w_exf_error_message, and say where the stack trace and context values it shows come from."
+    },
+    {
+      "name": "pfw",
+      "repo": "https://github.com/gaoqiangz/pfw",
+      "size": "Medium",
+      "files": "~616",
+      "question": "In pfw, when the user clicks the maximize button in a custom s_cst_window's title bar, how does the click travel from the window's mouse handling into n_cst_window_titlebar and back to the window to change its state? Trace the events and functions involved, ending at wf_SetWindowStateAsync."
+    },
+    {
+      "name": "pfc-2022",
+      "repo": "https://github.com/OpenSourcePFCLibraries/2022",
+      "size": "Medium",
+      "files": "~667",
+      "question": "In the PowerBuilder Foundation Classes, when a sheet window is saved (pfc_save on pfc_w_master), how does the save flow through the window's update events and the logical-unit-of-work service (n_cst_luw) down to each DataWindow's update? Trace from pfc_save to the point where u_dw actually calls Update()."
+    }
   ]
 }

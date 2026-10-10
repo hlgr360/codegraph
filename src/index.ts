@@ -27,6 +27,7 @@ import {
   UnresolvedReference,
   IndexHealth,
 } from './types';
+import { CASE_INSENSITIVE_LANGUAGES } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
 import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
 import { QueryBuilder } from './db/queries';
@@ -1863,7 +1864,12 @@ export class CodeGraph {
    * definition the caller wants is never dropped below a search cut.
    */
   getNodesByName(name: string): Node[] {
-    return this.queries.getNodesByName(name);
+    const exact = this.queries.getNodesByName(name);
+    if (exact.length > 0) return exact;
+    // In a language whose names ignore case, `wf_SetWindowStateAsync` (as a
+    // call writes it) IS the `wf_setwindowstateasync` its script declares.
+    return this.queries.getNodesByLowerName(name)
+      .filter((n) => CASE_INSENSITIVE_LANGUAGES.has(n.language));
   }
 
   /** Nodes whose name starts with `prefix` (index range scan, capped). */

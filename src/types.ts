@@ -118,10 +118,18 @@ export const LANGUAGES = [
   'vbnet',
   'erlang',
   'terraform',
+  'powerbuilder',
   'unknown',
 ] as const;
 
 export type Language = (typeof LANGUAGES)[number];
+
+/**
+ * Languages whose identifiers ignore case: PHP, Pascal/Delphi, CFML, COBOL,
+ * VB.NET and PowerBuilder all mean `FormatPrice` when they write
+ * `formatprice`. Resolution and symbol lookup both read this.
+ */
+export const CASE_INSENSITIVE_LANGUAGES: ReadonlySet<string> = new Set<string>(['php', 'pascal', 'cfml', 'cfscript', 'cfquery', 'cobol', 'vbnet', 'powerbuilder']);
 
 // =============================================================================
 // Core Graph Types
