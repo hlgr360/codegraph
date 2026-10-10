@@ -34,6 +34,7 @@ import type { Node as SyntaxNode, Tree } from 'web-tree-sitter';
 import type { Language } from '../types';
 import { getParser, loadGrammarsForLanguages } from '../extraction/grammars';
 import { parseWithinBudget } from '../extraction/parse-budget';
+import { readSourceTextSync } from '../file-limits';
 
 // =============================================================================
 // Public shape
@@ -198,7 +199,7 @@ async function treeFor(absPath: string, language: Language): Promise<CachedTree 
   if (stat.size > MAX_PARSE_BYTES) return null;
   let source: string;
   try {
-    source = fs.readFileSync(absPath, 'utf8');
+    source = readSourceTextSync(absPath);
   } catch {
     return null;
   }
@@ -290,7 +291,7 @@ export function guardsForFileSync(
     if (!parser) return out;
     let source: string;
     try {
-      source = fs.readFileSync(absPath, 'utf8');
+      source = readSourceTextSync(absPath);
     } catch {
       return out;
     }

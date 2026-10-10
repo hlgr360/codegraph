@@ -12,8 +12,15 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- The standalone installers (`install.sh`, `install.ps1`) can install from a fork's own GitHub releases: set `CODEGRAPH_REPO` to the fork (for example `CODEGRAPH_REPO=owner/codegraph`).
+- CodeGraph now indexes **PowerBuilder** object sources (`.sra`, `.srw`, `.sru`, `.srm`, `.srf`, `.srs`), both PBL exports and PowerBuilder 2025 solutions. It picks up objects, controls, menu items, functions, events, external functions, structures and variables, and links inheritance, calls, events fired with `TriggerEvent`/`PostEvent`, `create` and `Open` of windows. Calls are matched the way PowerBuilder does it: without regard to case, through the ancestor chain and `super::`, from a control's script out to its window, through a variable's declared type, and to the overload taking that many arguments.
+
 ### Fixes
 
+- Source files saved as UTF-16 (as many Windows tools write them, PowerBuilder exports among them) are now read as text. Before, such a file was indexed with no symbols, and `codegraph_explore` could not show its code. Re-index projects that contain UTF-16 files after upgrading.
+- `codegraph_explore` now finds a PowerBuilder, VB.NET, PHP, Pascal/Delphi, COBOL or CFML symbol however the query capitalizes it, and still traces the call path between them. These languages ignore case, so an agent asking for `wf_SetWindowStateAsync` means the `wf_setwindowstateasync` the code declares.
 - In VB.NET, every member of a `Structure` is now indexed, including its fields, properties, methods, constructors and nested enums. Before, only the first member was, so the rest could not be found and their callers looked empty.
 - In VB.NET and C#, what a property's `Get` and `Set` code calls, creates and reads now belongs to that property, as do C#'s `get => …` accessors and `=> …` property bodies. Before, it was dropped, so a method used only from a property looked unused.
 - In VB.NET, a field or property initializer like `= Compute()` or `As New List(Of Order)` now links what it calls and creates, and so do a `Custom Event`'s `AddHandler`, `RemoveHandler` and `RaiseEvent` blocks. Re-index VB.NET and C# projects after upgrading.

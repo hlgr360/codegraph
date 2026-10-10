@@ -27,6 +27,7 @@ import { isCppConstructorRef, matchCppConstructor } from './cpp-constructor';
 import { isCppSupertypeRef, matchCppSupertype, clearCppSupertypeMemos } from './cpp-supertypes';
 import { gateSwiftTypeTarget, clearSwiftTypeVisibility, swiftExtendedConformances } from './swift-type-visibility';
 import { clearDartLibraryMemos } from './dart-libraries';
+import { clearPowerBuilderMemos, matchPowerBuilderRef } from './powerbuilder';
 import { clearVbnetReceiverMemos, isVbMemberRead, isVbPathCall, matchVbMemberRead, matchVbPathCall } from './vbnet-receivers';
 import { gateTypeParameter, clearTypeParameterMemos } from './type-parameters';
 import { gateDartLocal, clearDartLocalScopeMemos } from './dart-local-scope';
@@ -39,7 +40,7 @@ import { resolveAliasBinding } from './alias-binding';
 import { detectFrameworks, getResolvingFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
-import { MAX_SOURCE_FILE_SIZE_BYTES } from '../file-limits';
+import { MAX_SOURCE_FILE_SIZE_BYTES, decodeSourceText, readSourceTextSync } from '../file-limits';
 import { loadProjectAliases, type AliasMap } from './path-aliases';
 import { findGoModuleForImport, goModulePackageDir, loadGoModule, type GoModule } from './go-module';
 import { loadWorkspacePackages, type WorkspacePackages } from './workspace-packages';
@@ -584,6 +585,7 @@ export class ReferenceResolver {
       clearSwiftTypeVisibility(this.context);
       clearDartLibraryMemos(this.context);
       clearVbnetReceiverMemos(this.context);
+      clearPowerBuilderMemos(this.context);
       clearTypeParameterMemos(this.context);
       clearDartLocalScopeMemos(this.context);
       clearCppTypeAliasMemos(this.context);
@@ -650,7 +652,7 @@ export class ReferenceResolver {
         this.fileCache.set(filePath, null);
         return null;
       }
-      const content = fs.readFileSync(fullPath, 'utf-8');
+      const content = readSourceTextSync(fullPath);
       this.fileCache.set(filePath, content);
       return content;
     } catch (error) {
@@ -671,7 +673,10 @@ export class ReferenceResolver {
     try {
       const stats = fs.statSync(fullPath);
       if (!stats.isFile() || stats.size > MAX_SOURCE_FILE_SIZE_BYTES) return false;
-      return fs.readFileSync(fullPath).includes(needle);
+      const bytes = fs.readFileSync(fullPath);
+      // A UTF-16 file holds no ASCII run as ASCII bytes; search its text.
+      const utf16 = bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
+      return utf16 ? decodeSourceText(bytes).includes(needle) : bytes.includes(needle);
     } catch {
       return false;
     }
@@ -1304,6 +1309,10 @@ export class ReferenceResolver {
     // or nothing: Shopify never looks in another theme (see ./shopify-themes).
     const themeFile = matchShopifyThemeFile(ref, this.context);
     if (themeFile !== undefined) return themeFile;
+
+    // PowerScript resolves through its own class chain, case-insensitively,
+    // and nothing else guesses past it (see ./powerbuilder).
+    if (ref.language === 'powerbuilder') return this.gateLanguage(matchPowerBuilderRef(ref, this.context), ref);
 
     // Skip built-in/external references
     if (this.isBuiltInOrExternal(ref)) {

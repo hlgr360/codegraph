@@ -24,7 +24,7 @@
  * owns so the CLI and the MCP tools cannot drift apart again.
  */
 
-import type { Node } from '../types';
+import { CASE_INSENSITIVE_LANGUAGES, type Node } from '../types';
 
 /** Rust path prefixes that name no directory (`crate::x`, `super::y`). */
 export const RUST_PATH_PREFIXES = new Set(['crate', 'super', 'self']);
@@ -60,6 +60,11 @@ function canonicalScope(text: string): string {
  * packages) — against the path.
  */
 export function matchesSymbol(node: Node, symbol: string): boolean {
+  // A language whose names ignore case matches a symbol however it is cased.
+  if (CASE_INSENSITIVE_LANGUAGES.has(node.language) && node.name.toLowerCase() === symbol.toLowerCase().split(/::|[./]/).pop()) {
+    node = { ...node, name: node.name.toLowerCase(), qualifiedName: node.qualifiedName.toLowerCase() };
+    symbol = symbol.toLowerCase();
+  }
   // Erlang arity spelling (`fn/3`, `mod:fn/3`): when the node's qualifiedName
   // carries an arity (#1610) the written arity must match exactly, and the rest
   // of the comparison runs on the arity-less spelling. A node with no arity

@@ -199,6 +199,17 @@ describe('Language Detection', () => {
     expect(isSourceFile('legacy/module.src')).toBe(false);
   });
 
+  it('should detect PowerBuilder object sources', () => {
+    expect(detectLanguage('app.pbl/app.sra')).toBe('powerbuilder');
+    expect(detectLanguage('main.pbl/w_main.srw')).toBe('powerbuilder');
+    expect(detectLanguage('main.pbl/n_cst_svc.sru')).toBe('powerbuilder');
+    expect(detectLanguage('main.pbl/m_main.srm')).toBe('powerbuilder');
+    expect(detectLanguage('main.pbl/f_util.srf')).toBe('powerbuilder');
+    expect(detectLanguage('main.pbl/s_data.srs')).toBe('powerbuilder');
+    // A DataWindow is not PowerScript.
+    expect(detectLanguage('main.pbl/d_list.srd')).toBe('unknown');
+  });
+
   it('should detect Solidity files', () => {
     expect(detectLanguage('contracts/Vault.sol')).toBe('solidity');
   });
@@ -13803,5 +13814,164 @@ describe('C++ COM interface declarations (#1519)', () => {
     const expected = source.replace('interface IDerived', 'struct    IDerived').replace('interface IStandalone', 'struct    IStandalone');
     expect(cppExtractor.preParse!(source, 'com.hpp')).toBe(expected);
     expect(Buffer.byteLength(expected)).toBe(Buffer.byteLength(source));
+  });
+});
+
+describe('PowerBuilder Extraction', () => {
+  const userObject = `forward
+global type n_cst_orders from n_base
+end type
+end forward
+
+global type n_cst_orders from n_base
+event type integer ue_refresh ( long al_row )
+event ue_declared_only ( )
+end type
+global n_cst_orders n_cst_orders
+
+type prototypes
+function long GetTickCount() library "kernel32.dll"
+end prototypes
+
+type variables
+Public:
+constant integer DEFAULT = 0
+Protected:
+n_cst_string inv_string
+end variables
+
+forward prototypes
+public function integer of_load (long al_id)
+private subroutine of_reset ()
+end prototypes
+
+public function integer of_load (long al_id);n_cst_orderline lnv_line
+lnv_line = create n_cst_orderline
+lnv_line.of_init(al_id)
+inv_string.of_trim("x")
+this.of_reset()
+super::of_load(al_id)
+this.TriggerEvent("ue_refresh")
+Open(w_order_detail)
+return 1
+end function
+
+private subroutine of_reset ();
+end subroutine
+
+event ue_refresh;call super::ue_refresh;of_reset()
+return 1
+end event
+`;
+
+  it('extracts the object, its members and their visibility', () => {
+    const result = extractFromSource('main.pbl/n_cst_orders.sru', userObject);
+    const byName = (name: string) => result.nodes.find((n) => n.name === name);
+    expect(byName('n_cst_orders')?.kind).toBe('class');
+    expect(byName('n_cst_orders')?.language).toBe('powerbuilder');
+    expect(byName('of_load')).toMatchObject({ kind: 'method', qualifiedName: 'n_cst_orders::of_load', visibility: 'public' });
+    expect(byName('of_reset')).toMatchObject({ kind: 'method', visibility: 'private' });
+    expect(byName('ue_refresh')).toMatchObject({ kind: 'method', decorators: ['event'] });
+    // Declared in the type block with no script here: still a member.
+    expect(byName('ue_declared_only')?.kind).toBe('method');
+    expect(byName('GetTickCount')?.kind).toBe('method');
+    expect(byName('DEFAULT')?.kind).toBe('constant');
+    expect(byName('inv_string')).toMatchObject({ kind: 'field', visibility: 'protected', signature: 'n_cst_string inv_string' });
+    // The forward prototypes do not mint a second of_load.
+    expect(result.nodes.filter((n) => n.name === 'of_load')).toHaveLength(1);
+  });
+
+  it('records inheritance, calls, events fired by name and instantiation', () => {
+    const result = extractFromSource('main.pbl/n_cst_orders.sru', userObject);
+    const refs = (kind: string) => result.unresolvedReferences.filter((r) => r.referenceKind === kind).map((r) => r.referenceName);
+    expect(refs('extends')).toEqual(['n_base']);
+    expect(refs('calls')).toEqual(expect.arrayContaining([
+      'n_cst_orderline.of_init', // a local is typed by its declaration
+      'inv_string.of_trim', // an instance variable is typed by the resolver
+      'of_reset', // `this.` is the caller's own object
+      'n_base.of_load', // `super::` is the ancestor
+      'ue_refresh', // TriggerEvent("ue_refresh")
+      'n_base.ue_refresh', // call super::ue_refresh
+    ]));
+    expect(refs('instantiates')).toEqual(expect.arrayContaining(['n_cst_orderline', 'w_order_detail']));
+  });
+
+  it('gives each control its own class and its events, inside the window', () => {
+    const code = `forward
+global type w_main from window
+end type
+type cb_ok from commandbutton within w_main
+end type
+end forward
+
+global type w_main from window
+cb_ok cb_ok
+end type
+global w_main w_main
+
+public subroutine of_save ();
+end subroutine
+
+on w_main.create
+this.cb_ok=create cb_ok
+end on
+
+event open;of_save()
+end event
+
+type cb_ok from commandbutton within w_main
+string text = "OK"
+end type
+
+event clicked;parent.of_save()
+end event
+`;
+    const result = extractFromSource('main.pbl/w_main.srw', code);
+    const cb = result.nodes.find((n) => n.name === 'cb_ok');
+    expect(cb).toMatchObject({ kind: 'class', qualifiedName: 'w_main::cb_ok' });
+    const clicked = result.nodes.find((n) => n.name === 'clicked');
+    expect(clicked?.qualifiedName).toBe('cb_ok::clicked');
+    expect(result.nodes.find((n) => n.name === 'open')?.qualifiedName).toBe('w_main::open');
+    expect(result.nodes.find((n) => n.name === 'create')?.qualifiedName).toBe('w_main::create');
+    const fromClicked = result.unresolvedReferences.filter((r) => r.fromNodeId === clicked!.id).map((r) => r.referenceName);
+    expect(fromClicked).toEqual(['w_main.of_save']); // `parent` is the window
+  });
+
+  it('reads a menu item event written as `event item::clicked`', () => {
+    const code = `global type m_main from m_base
+end type
+
+event m_file::clicked;call super::clicked;of_send("x")
+end event
+`;
+    const result = extractFromSource('main.pbl/m_main.srm', code);
+    const clicked = result.nodes.find((n) => n.name === 'clicked');
+    expect(clicked?.kind).toBe('method');
+    expect(result.unresolvedReferences.some((r) => r.fromNodeId === clicked!.id && r.referenceName === 'of_send')).toBe(true);
+  });
+
+  it('extracts global functions and structures', () => {
+    const fn = `global type f_util from function_object
+end type
+
+forward prototypes
+global function integer f_util (string as_x)
+end prototypes
+
+global function integer f_util (string as_x);return 1
+end function
+`;
+    const fnResult = extractFromSource('main.pbl/f_util.srf', fn);
+    expect(fnResult.nodes.filter((n) => n.kind === 'class')).toHaveLength(0);
+    expect(fnResult.nodes.find((n) => n.name === 'f_util')).toMatchObject({ kind: 'function', isExported: true });
+
+    const st = `global type s_order from structure
+\tlong\t\tid
+\tstring\t\tname
+end type
+`;
+    const stResult = extractFromSource('main.pbl/s_order.srs', st);
+    expect(stResult.nodes.find((n) => n.name === 's_order')?.kind).toBe('struct');
+    expect(stResult.nodes.filter((n) => n.kind === 'field').map((n) => n.name)).toEqual(['id', 'name']);
   });
 });

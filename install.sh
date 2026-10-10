@@ -13,11 +13,13 @@
 #
 # Environment:
 #   CODEGRAPH_VERSION      release tag to install (default: latest)
+#   CODEGRAPH_REPO         GitHub repo whose releases to install, e.g. a fork
+#                          (default: colbymchenry/codegraph)
 #   CODEGRAPH_INSTALL_DIR  bundle location   (default: ~/.codegraph)
 #   CODEGRAPH_BIN_DIR      symlink location  (default: ~/.local/bin)
 set -eu
 
-REPO="colbymchenry/codegraph"
+REPO="${CODEGRAPH_REPO:-colbymchenry/codegraph}"
 INSTALL_DIR="${CODEGRAPH_INSTALL_DIR:-$HOME/.codegraph}"
 BIN_DIR="${CODEGRAPH_BIN_DIR:-$HOME/.local/bin}"
 

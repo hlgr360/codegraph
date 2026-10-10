@@ -6,7 +6,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { Language, Node } from '../types';
+import { CASE_INSENSITIVE_LANGUAGES, Language, Node } from '../types';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, isSupertypeTarget, CPP_DEFINE_SIGNATURE, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
@@ -174,7 +174,7 @@ const CODE_FAMILY: Record<string, string> = {
   ...LANGUAGE_FAMILY,
   python: 'python', go: 'go', rust: 'rust', php: 'php', ruby: 'ruby', dart: 'dart',
   lua: 'lua', luau: 'lua', r: 'r', erlang: 'erlang', pascal: 'pascal', solidity: 'solidity',
-  nix: 'nix', cobol: 'cobol',
+  nix: 'nix', cobol: 'cobol', powerbuilder: 'powerbuilder',
 };
 
 export function crossesCodeBoundary(a: string, b: string): boolean {
@@ -2835,8 +2835,8 @@ export function isVisibleAcrossFiles(candidate: Node, ref: UnresolvedRef, contex
 const JS_FAMILY = new Set<string>(['typescript', 'tsx', 'javascript', 'jsx', 'vue', 'svelte', 'astro']);
 const JS_TS = new Set<string>(['typescript', 'tsx', 'javascript', 'jsx']);
 
-/** Languages whose identifiers resolve regardless of case. */
-export const CASE_INSENSITIVE_LANGUAGES = new Set<string>(['php', 'pascal', 'cfml', 'cfscript', 'cfquery', 'cobol', 'vbnet']);
+/** Languages whose identifiers resolve regardless of case (defined with the language list). */
+export { CASE_INSENSITIVE_LANGUAGES };
 
 /**
  * Whether a JS/TS `calls` ref is a RECEIVER-LESS call — `serialize(x)`, not

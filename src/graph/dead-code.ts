@@ -104,6 +104,7 @@ import path from 'path';
 import type CodeGraph from '../index';
 import type { EdgeKind, Node, NodeKind } from '../types';
 import { isTestFile } from '../search/query-utils';
+import { readSourceTextSync } from '../file-limits';
 
 // =============================================================================
 // Caps and defaults
@@ -713,7 +714,7 @@ function defaultSourceReader(cg: CodeGraph): (filePath: string) => string | null
       if (absolute !== root && !absolute.startsWith(root + path.sep)) return null;
       const stat = fs.statSync(absolute);
       if (!stat.isFile() || stat.size > MAX_CORROBORATION_BYTES) return null;
-      return fs.readFileSync(absolute, 'utf8');
+      return readSourceTextSync(absolute);
     } catch {
       return null;
     }

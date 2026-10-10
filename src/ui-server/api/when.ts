@@ -36,6 +36,7 @@ import { resolveProjectFile } from '../security';
 import { declaresExtension } from '../../resolution/swift-type-visibility';
 import { findIndexedFile, hasDriftedOnDisk } from './source';
 import type { WireEdge } from './wire';
+import { readSourceTextSync } from '../../file-limits';
 
 /** Distinct files parsed per request, and sites labelled per request. */
 const MAX_FILES = 24;
@@ -173,7 +174,7 @@ export function createSiteReader(cg: CodeGraph, projectRoot: string, maxSites = 
     let text = texts.get(abs);
     if (text === undefined) {
       try {
-        text = fs.statSync(abs).size <= MAX_DIRECTIVE_FILE ? fs.readFileSync(abs, 'utf8') : null;
+        text = fs.statSync(abs).size <= MAX_DIRECTIVE_FILE ? readSourceTextSync(abs) : null;
       } catch {
         text = null;
       }

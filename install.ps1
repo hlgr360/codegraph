@@ -89,7 +89,8 @@ function Install-CodeGraphFiles([string]$Stage, [string]$Dest) {
 }
 # <<< Install-CodeGraphFiles
 
-$repo = 'colbymchenry/codegraph'
+# A fork publishes its own releases: CODEGRAPH_REPO names it (e.g. owner/codegraph).
+$repo = if ($env:CODEGRAPH_REPO) { $env:CODEGRAPH_REPO } else { 'colbymchenry/codegraph' }
 $installDir = if ($env:CODEGRAPH_INSTALL_DIR) { $env:CODEGRAPH_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'codegraph' }
 
 # 1. Detect architecture -> target matching the release archives.

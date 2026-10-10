@@ -51,6 +51,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   terraform: 'tree-sitter-terraform.wasm',
   arkts: 'tree-sitter-arkts.wasm',
   nix: 'tree-sitter-nix.wasm',
+  powerbuilder: 'tree-sitter-powerscript.wasm',
 };
 
 /**
@@ -171,6 +172,16 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.tf': 'terraform',
   '.tfvars': 'terraform',
   '.tofu': 'terraform',
+  // PowerBuilder: PowerScript object sources as exported from a PBL or kept
+  // as plain files by a PB 2025 solution — application, window, user object,
+  // menu, global function, structure. DataWindows (`.srd`) are a separate
+  // declarative syntax the grammar does not parse, so they are not mapped.
+  '.sra': 'powerbuilder',
+  '.srw': 'powerbuilder',
+  '.sru': 'powerbuilder',
+  '.srm': 'powerbuilder',
+  '.srf': 'powerbuilder',
+  '.srs': 'powerbuilder',
 };
 
 /** MPEG transport stream: fixed 188-byte packets, each opening with 0x47. */
@@ -397,6 +408,9 @@ export async function initGrammars(): Promise<void> {
 const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   'pascal', 'scala', 'lua', 'luau', 'csharp', 'r', 'cfml', 'cfscript', 'cfquery',
   'cobol', 'vbnet', 'erlang', 'terraform', 'arkts', 'nix',
+  // pb-shrugged/tree-sitter-powerscript v0.0.16 (568093b), the prebuilt
+  // `tree-sitter-powerscript.wasm` release asset (ABI 15).
+  'powerbuilder',
   'typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go',
   // R7a (C/C++ kernel port prep): tree-sitter-c v0.24.2 (b780e47) +
   // tree-sitter-cpp v0.23.4 (f41e1a0), parser.c/scanner.c sha-matched against
@@ -936,6 +950,7 @@ export function getLanguageDisplayName(language: Language): string {
     vbnet: 'Visual Basic .NET',
     erlang: 'Erlang',
     terraform: 'Terraform',
+    powerbuilder: 'PowerBuilder',
     arkts: 'ArkTS',
     unknown: 'Unknown',
   };

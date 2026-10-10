@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
-import { MAX_SOURCE_FILE_SIZE_BYTES, oversizeStamp } from '../file-limits';
+import { MAX_SOURCE_FILE_SIZE_BYTES, decodeSourceText, oversizeStamp } from '../file-limits';
 import { validatePathWithinRoot } from '../utils';
 
 export interface AnswerFile {
@@ -45,17 +45,18 @@ export async function validateAnswerFiles(root: string, files: AnswerFile[]): Pr
           createHash('sha256').update(oversizeStamp(size)).digest('hex') === file.contentHash) {
         continue;
       }
-      const stream = createReadStream(absolute, {
-        encoding: 'utf8', highWaterMark: 64 * 1024, signal,
-      });
+      // Raw bytes, decoded whole as indexing decodes them: the stored hash is
+      // of the file's text, which for a UTF-16 file is not its UTF-8 reading.
+      const stream = createReadStream(absolute, { highWaterMark: 64 * 1024, signal });
+      const chunks: Buffer[] = [];
       let complete = true;
-      for await (const chunk of stream) {
-        bytes += Buffer.byteLength(chunk);
+      for await (const chunk of stream as AsyncIterable<Buffer>) {
+        bytes += chunk.length;
         if (bytes > MAX_BYTES) { complete = false; break; }
-        hash.update(chunk);
+        chunks.push(chunk);
       }
       if (!complete) unchecked.push(file.path);
-      else if (hash.digest('hex') !== file.contentHash) stale.push(file.path);
+      else if (hash.update(decodeSourceText(Buffer.concat(chunks))).digest('hex') !== file.contentHash) stale.push(file.path);
     } catch {
       // Timeout is unknown, never a clean bill of health. A missing or
       // unreadable contributing file cannot support the indexed answer.
