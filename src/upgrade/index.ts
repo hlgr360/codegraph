@@ -31,7 +31,13 @@ import * as https from 'https';
 import { spawnSync } from 'child_process';
 import { ansiColorsEnabled } from '../ui/color';
 
-export const REPO = 'colbymchenry/codegraph';
+/**
+ * The GitHub repo whose releases `upgrade` installs and the update check
+ * watches. This fork publishes its own releases, so it points here, not at
+ * upstream. install.sh and install.ps1 default to the same repo (a test pins
+ * the three equal), and the bundle installer is told it explicitly.
+ */
+export const REPO = 'hlgr360/codegraph';
 export const NPM_PACKAGE = '@colbymchenry/codegraph';
 const RAW_BASE = `https://raw.githubusercontent.com/${REPO}/main`;
 export const INSTALL_SH_URL = `${RAW_BASE}/install.sh`;
@@ -154,16 +160,23 @@ export interface Semver {
   minor: number;
   patch: number;
   pre: string | null;
+  /**
+   * A fork release's number on top of the upstream version: tag `v1.6.2.1`,
+   * package version `1.6.2+fork.1`. Absent on an upstream version.
+   */
+  fork?: number;
 }
 
 export function parseSemver(version: string): Semver | null {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(version.trim());
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+fork\.(\d+))?/.exec(version.trim());
   if (!m) return null;
+  const fork = parseInt(m[4] ?? m[6] ?? '0', 10);
   return {
     major: parseInt(m[1]!, 10),
     minor: parseInt(m[2]!, 10),
     patch: parseInt(m[3]!, 10),
-    pre: m[4] ?? null,
+    pre: m[5] ?? null,
+    ...(fork > 0 ? { fork } : {}),
   };
 }
 
@@ -178,8 +191,10 @@ export function compareVersions(a: string, b: string): number {
   // A prerelease is "less than" its release (1.0.0-rc < 1.0.0).
   if (sa.pre && !sb.pre) return -1;
   if (!sa.pre && sb.pre) return 1;
-  if (sa.pre && sb.pre) return sa.pre < sb.pre ? -1 : sa.pre > sb.pre ? 1 : 0;
-  return 0;
+  if (sa.pre && sb.pre && sa.pre !== sb.pre) return sa.pre < sb.pre ? -1 : 1;
+  // A fork release sorts after the upstream version it builds on, and after
+  // that version's earlier fork releases (1.6.2 < 1.6.2.1 < 1.6.2.2 < 1.6.3).
+  return (sa.fork ?? 0) - (sb.fork ?? 0);
 }
 
 export function isUpdateAvailable(current: string, latest: string): boolean {
@@ -565,6 +580,7 @@ function upgradeUnixBundle(
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (method.installDir) env.CODEGRAPH_INSTALL_DIR = method.installDir;
   if (pinned) env.CODEGRAPH_VERSION = pinned;
+  env.CODEGRAPH_REPO = REPO;
 
   deps.log(c.dim(`Running the installer (${downloader} | sh)…`));
   const code = deps.run('sh', ['-c', `${downloader} | sh`], env);
@@ -651,7 +667,7 @@ export const WINDOWS_SWAP_FUNCTION = String.raw`function Install-CodeGraphFiles(
     $lost = Undo-Logged
     $msg = "Could not replace $at ($($x.Message))."
     if ($lost) {
-      $msg += " $lost file(s) could not be put back, so the install may not start. Close your agent sessions and any running codegraph commands, then reinstall: irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex"
+      $msg += " $lost file(s) could not be put back, so the install may not start. Close your agent sessions and any running codegraph commands, then reinstall: irm https://raw.githubusercontent.com/hlgr360/codegraph/main/install.ps1 | iex"
     } else {
       $msg += " Nothing was changed: the existing install still works. If another program has CodeGraph's files open, close your agent sessions (they run the CodeGraph MCP server) and any running codegraph commands, then try again."
     }

@@ -30,7 +30,7 @@ function mkTmpDir(label: string): string {
 }
 
 describe('standalone installer Windows shell guidance (#1294)', () => {
-  const command = 'irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex';
+  const command = 'irm https://raw.githubusercontent.com/hlgr360/codegraph/main/install.ps1 | iex';
   const source = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
 
   // Stub uname and downloads, but execute the complete shipped installer.

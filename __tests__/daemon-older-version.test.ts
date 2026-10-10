@@ -57,6 +57,15 @@ describe('isOlderRelease', () => {
     expect(isOlderRelease('2.0.0', '1.99.99')).toBe(false);
   });
 
+  it("orders this fork's releases after the release they build on", () => {
+    expect(isOlderRelease('1.6.2', '1.6.2+fork.1')).toBe(true);
+    expect(isOlderRelease('1.6.2+fork.1', '1.6.2+fork.2')).toBe(true);
+    expect(isOlderRelease('1.6.2+fork.9', '1.6.3')).toBe(true);
+    expect(isOlderRelease('1.6.2+fork.2', '1.6.2+fork.2')).toBe(false);
+    expect(isOlderRelease('1.6.2+fork.2', '1.6.2+fork.1')).toBe(false);
+    expect(isOlderRelease('1.6.2+fork.1', '1.6.2')).toBe(false);
+  });
+
   it('never calls a prerelease, a build or an unknown version older, in either position', () => {
     for (const odd of ['0.0.0-unknown', '0.0.0-mismatch', '1.6.1-beta.1', '1.6.1+local', 'v1.6.1', 'unknown', 'test', '', '1.6']) {
       expect(isOlderRelease(odd, '1.6.2'), odd).toBe(false);
@@ -65,7 +74,7 @@ describe('isOlderRelease', () => {
   });
 
   it('lets at most one of two versions replace the other', () => {
-    const versions = ['0.9.0', '1.6.1', '1.6.2', '1.6.10', '1.7.0', '2.0.0', '1.6.2-rc.1', '0.0.0-unknown'];
+    const versions = ['0.9.0', '1.6.1', '1.6.2', '1.6.2+fork.1', '1.6.2+fork.2', '1.6.10', '1.7.0', '2.0.0', '1.6.2-rc.1', '0.0.0-unknown'];
     for (const a of versions) {
       for (const b of versions) {
         expect(isOlderRelease(a, b) && isOlderRelease(b, a), `${a} / ${b}`).toBe(false);

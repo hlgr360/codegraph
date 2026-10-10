@@ -6,7 +6,7 @@
 # GitHub Releases. No Node.js, no build tools, no npm required — ideal for a
 # fresh Linux VPS over SSH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/hlgr360/codegraph/main/install.sh | sh
 #
 # Upgrade:   run `codegraph upgrade` (or just re-run the same command).
 # Uninstall: curl -fsSL .../install.sh | sh -s -- --uninstall
@@ -14,12 +14,12 @@
 # Environment:
 #   CODEGRAPH_VERSION      release tag to install (default: latest)
 #   CODEGRAPH_REPO         GitHub repo whose releases to install, e.g. a fork
-#                          (default: colbymchenry/codegraph)
+#                          (default: hlgr360/codegraph, this fork)
 #   CODEGRAPH_INSTALL_DIR  bundle location   (default: ~/.codegraph)
 #   CODEGRAPH_BIN_DIR      symlink location  (default: ~/.local/bin)
 set -eu
 
-REPO="${CODEGRAPH_REPO:-colbymchenry/codegraph}"
+REPO="${CODEGRAPH_REPO:-hlgr360/codegraph}"
 INSTALL_DIR="${CODEGRAPH_INSTALL_DIR:-$HOME/.codegraph}"
 BIN_DIR="${CODEGRAPH_BIN_DIR:-$HOME/.local/bin}"
 
@@ -38,7 +38,7 @@ case "$os" in
   Linux)  os="linux" ;;
   MINGW*|MSYS*|CYGWIN*)
     echo "codegraph: on Windows, open PowerShell and run:" >&2
-    echo "  irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex" >&2
+    echo "  irm https://raw.githubusercontent.com/hlgr360/codegraph/main/install.ps1 | iex" >&2
     exit 1
     ;;
   *) echo "codegraph: unsupported OS '$os'." >&2; exit 1 ;;

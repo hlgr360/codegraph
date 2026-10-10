@@ -127,7 +127,7 @@ function writeUpdateCheckCache(dir: string, cache: UpdateCheckCacheFile): void {
 export function canonicalVersionTag(v: string): string | null {
   const s = parseSemver(v);
   if (!s) return null;
-  return `v${s.major}.${s.minor}.${s.patch}${s.pre ? `-${s.pre}` : ''}`;
+  return `v${s.major}.${s.minor}.${s.patch}${s.fork ? `.${s.fork}` : ''}${s.pre ? `-${s.pre}` : ''}`;
 }
 
 /** One user-facing sentence; every surface (stderr, instructions, status) shows this. */

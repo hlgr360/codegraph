@@ -1,6 +1,6 @@
 /**
- * install.sh installs from the repo `CODEGRAPH_REPO` names — a fork that
- * publishes its own releases — and from upstream when it names none.
+ * install.sh installs from the repo `CODEGRAPH_REPO` names, and from this
+ * fork's releases when it names none.
  *
  * Runs the REAL install.sh with a stub `curl` first on PATH that records the
  * URL it was asked for and fails, so nothing is downloaded and the script
@@ -48,14 +48,14 @@ function runInstall(env: Record<string, string>): string[] {
 }
 
 describe.runIf(process.platform !== 'win32')('install.sh release repo', () => {
-  it('downloads from the fork CODEGRAPH_REPO names', () => {
-    const urls = runInstall({ CODEGRAPH_REPO: 'hlgr360/codegraph' });
+  it('downloads from the repo CODEGRAPH_REPO names', () => {
+    const urls = runInstall({ CODEGRAPH_REPO: 'colbymchenry/codegraph' });
     expect(urls).toHaveLength(1);
-    expect(urls[0]).toMatch(/^https:\/\/github\.com\/hlgr360\/codegraph\/releases\/download\/v1\.6\.2\.1\/codegraph-(darwin|linux)-(arm64|x64)\.tar\.gz$/);
+    expect(urls[0]).toMatch(/^https:\/\/github\.com\/colbymchenry\/codegraph\/releases\/download\/v1\.6\.2\.1\/codegraph-(darwin|linux)-(arm64|x64)\.tar\.gz$/);
   });
 
-  it('downloads from upstream when no repo is named', () => {
+  it("downloads from this fork's releases when no repo is named", () => {
     const urls = runInstall({});
-    expect(urls[0]).toMatch(/^https:\/\/github\.com\/colbymchenry\/codegraph\/releases\/download\/v1\.6\.2\.1\//);
+    expect(urls[0]).toMatch(/^https:\/\/github\.com\/hlgr360\/codegraph\/releases\/download\/v1\.6\.2\.1\//);
   });
 });

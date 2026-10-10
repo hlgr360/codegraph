@@ -19,9 +19,11 @@ import {
   WINDOWS_SWAP_FUNCTION,
   WINDOWS_UPGRADE_DAMAGED,
   NPM_PACKAGE,
+  REPO,
   type InstallMethod,
   type UpgradeDeps,
 } from '../src/upgrade';
+import { canonicalVersionTag } from '../src/upgrade/update-check';
 import { EXTRACTION_VERSION } from '../src/extraction/extraction-version';
 import { CodeGraph } from '../src';
 
@@ -191,6 +193,31 @@ describe('version helpers', () => {
     expect(isUpdateAvailable('0.9.9', '0.9.8')).toBe(false);
     // dev sentinel can't parse → any difference means "update available"
     expect(isUpdateAvailable('0.0.0-unknown', '0.9.9')).toBe(true);
+  });
+
+  it('reads a fork release number from a tag or a package version', () => {
+    expect(parseSemver('v1.6.2.1')).toEqual({ major: 1, minor: 6, patch: 2, pre: null, fork: 1 });
+    expect(parseSemver('1.6.2+fork.3')).toEqual({ major: 1, minor: 6, patch: 2, pre: null, fork: 3 });
+    expect(compareVersions('1.6.2+fork.1', 'v1.6.2.1')).toBe(0);
+    expect(canonicalVersionTag('1.6.2+fork.2')).toBe('v1.6.2.2');
+    expect(canonicalVersionTag('v1.6.2.2 <injected>')).toBe('v1.6.2.2');
+  });
+
+  it('orders fork releases after their upstream version and before the next one', () => {
+    const order = ['1.6.2', '1.6.2+fork.1', 'v1.6.2.2', '1.6.3-rc.1', '1.6.3', 'v1.6.3.1'];
+    for (let i = 1; i < order.length; i++) {
+      expect(compareVersions(order[i]!, order[i - 1]!)).toBeGreaterThan(0);
+    }
+    expect(isUpdateAvailable('1.6.2+fork.1', 'v1.6.2.2')).toBe(true);
+    expect(isUpdateAvailable('1.6.2+fork.2', 'v1.6.2.2')).toBe(false);
+  });
+
+  it('upgrades from the same repo the installers default to', () => {
+    const root = path.join(__dirname, '..');
+    const sh = /^REPO="\$\{CODEGRAPH_REPO:-([^}]+)\}"$/m.exec(fs.readFileSync(path.join(root, 'install.sh'), 'utf8'));
+    const ps1 = /\$env:CODEGRAPH_REPO \} else \{ '([^']+)' \}/.exec(fs.readFileSync(path.join(root, 'install.ps1'), 'utf8'));
+    expect(sh?.[1]).toBe(REPO);
+    expect(ps1?.[1]).toBe(REPO);
   });
 
   it('normalizeVersion / stripV round-trip', () => {
@@ -418,6 +445,8 @@ describe('runUpgrade', () => {
     expect(calls.runs[0].args[1]).toContain('curl -fsSL');
     expect(calls.runs[0].args[1]).toContain('| sh');
     expect(calls.runs[0].env?.CODEGRAPH_INSTALL_DIR).toBe('/h/.codegraph');
+    expect(calls.runs[0].env?.CODEGRAPH_REPO).toBe(REPO);
+    expect(calls.runs[0].args[1]).toContain(`raw.githubusercontent.com/${REPO}/main/install.sh`);
     expect(calls.logs.join('\n')).toMatch(/codegraph sync/); // re-index advisory printed
   });
 

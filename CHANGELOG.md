@@ -15,6 +15,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### New Features
 
 - The standalone installers (`install.sh`, `install.ps1`) can install from a fork's own GitHub releases: set `CODEGRAPH_REPO` to the fork (for example `CODEGRAPH_REPO=owner/codegraph`).
+- This fork installs and upgrades from its own GitHub releases: the installers default to `hlgr360/codegraph`, and `codegraph upgrade` and the update notice follow its releases (tagged like `v1.6.2.2`) instead of reinstalling upstream, and a newer fork release's background server takes over from an older version's, as it does for upstream releases.
 - CodeGraph now indexes **PowerBuilder** object sources (`.sra`, `.srw`, `.sru`, `.srm`, `.srf`, `.srs`), both PBL exports and PowerBuilder 2025 solutions. It picks up objects, controls, menu items, functions, events, external functions, structures and variables, and links inheritance, calls, events fired with `TriggerEvent`/`PostEvent`, `create` and `Open` of windows. Calls are matched the way PowerBuilder does it: without regard to case, through the ancestor chain and `super::`, from a control's script out to its window, through a variable's declared type, and to the overload taking that many arguments.
 
 ### Fixes
