@@ -98,6 +98,13 @@ function maskNestedComments(source: string): string {
   return out.join('');
 }
 
+/**
+ * `dw_1.dataobject = "d_x"`, a comparison against it, or a control's
+ * `string dataobject = "d_x"` in its type block: the DataWindow named by a
+ * literal. A name held in a variable (`dataobject = is_dw`) is not one.
+ */
+const DATAOBJECT_RE = /\bdataobject\s*=\s*"([A-Za-z_][\w$#%-]*)"/gi;
+
 /** A string argument that can only be a type name. */
 const TYPE_NAME_RE = /^[A-Za-z_][\w$#%-]*$/;
 
@@ -654,6 +661,7 @@ function extractFile(root: SyntaxNode, ctx: ExtractorContext): void {
         break;
     }
   }
+  linkDataObjects(st);
   // A user event declared on a type but given no script here is still a
   // member descendants override and callers fire (`dw.event pfc_retrieve()`).
   for (const { owner, decl } of st.declaredEvents.values()) {
@@ -662,6 +670,53 @@ function extractFile(root: SyntaxNode, ctx: ExtractorContext): void {
     createIn(st, owner, 'method', getNodeText(nameNode, ctx.source), decl, {
       signature: collapse(getNodeText(decl, ctx.source)),
       decorators: ['event'],
+    });
+  }
+}
+
+/**
+ * Link each script and control that names a DataWindow by a literal to it, from
+ * the narrowest symbol around the mention: the function or event it is written
+ * in, or the control whose type block holds it. The DataWindow itself is read
+ * from its `.srd` (see DataWindowExtractor); the resolver finds it by name.
+ */
+function linkDataObjects(st: FileState): void {
+  const { source } = st.ctx;
+  if (!/dataobject/i.test(source)) return;
+  const lineStarts = [0];
+  for (let i = source.indexOf('\n'); i >= 0; i = source.indexOf('\n', i + 1)) lineStarts.push(i + 1);
+  const lineAt = (index: number): number => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid]! <= index) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+
+  const seen = new Set<string>();
+  for (const m of source.matchAll(DATAOBJECT_RE)) {
+    const line = lineAt(m.index!);
+    const lineStart = lineStarts[line - 1]!;
+    if (source.slice(lineStart, m.index).includes('//')) continue; // commented out
+    let owner: Node | undefined;
+    for (const n of st.ctx.nodes) {
+      if (n.kind === 'file' || n.startLine > line || n.endLine < line) continue;
+      if (!owner || n.endLine - n.startLine <= owner.endLine - owner.startLine) owner = n;
+    }
+    const from = owner ?? st.main;
+    if (!from) continue;
+    const key = `${from.id}\0${m[1]!.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    st.ctx.addUnresolvedReference({
+      fromNodeId: from.id,
+      referenceName: m[1]!,
+      referenceKind: 'references',
+      line,
+      column: m.index! - lineStart,
     });
   }
 }

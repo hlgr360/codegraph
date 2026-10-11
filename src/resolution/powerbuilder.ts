@@ -123,6 +123,17 @@ function findType(name: string, fromFile: string, context: ResolutionContext): N
 }
 
 /**
+ * The DataWindow named `name` — the `.srd` object a `dataobject = "d_x"`, a
+ * nested report or a drop-down names — nearest the caller first. It is a
+ * `component`, not a type: nothing inherits from it, and explore lets a query
+ * name it exactly.
+ */
+function findDataWindow(name: string, fromFile: string, context: ResolutionContext): Node | undefined {
+  const found = pbNodes(name, context).filter((n) => n.kind === 'component');
+  return found.find((n) => n.filePath === fromFile) ?? found[0];
+}
+
+/**
  * The class `cls` is declared `from`. A control or menu item named after its
  * ancestor (`type u_button from u_button within w_x`) does not inherit from
  * itself: the ancestor is the other type of that name.
@@ -325,7 +336,8 @@ export function matchPowerBuilderRef(ref: UnresolvedRef, context: ResolutionCont
       // A class is never its own ancestor (see parentOf).
       const from = ref.referenceKind === 'extends' ? context.getNodeById?.(ref.fromNodeId) : undefined;
       const type = (from && TYPE_KINDS.has(from.kind) ? parentOf(from, context) : undefined) ??
-        findType(ref.referenceName, ref.filePath, context);
+        findType(ref.referenceName, ref.filePath, context) ??
+        (ref.referenceKind === 'references' ? findDataWindow(ref.referenceName, ref.filePath, context) : undefined);
       return type && type.id !== ref.fromNodeId ? resolved(ref, type, 0.9) : null;
     }
     default:
