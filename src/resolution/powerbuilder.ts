@@ -135,7 +135,17 @@ function findType(name: string, fromFile: string, context: ResolutionContext): N
  */
 function findDataWindow(name: string, fromFile: string, context: ResolutionContext): Node | undefined {
   const found = pbNodes(name, context).filter((n) => n.kind === 'component');
-  return found.find((n) => n.filePath === fromFile) ?? found[0];
+  if (found.length <= 1) return found[0];
+  // A customer's report package repeats a name its siblings use: the one in the
+  // same directory, else the one sharing the longest path, is the caller's own.
+  const shared = (path: string): number => {
+    const a = path.split('/');
+    const b = fromFile.split('/');
+    let n = 0;
+    while (n < a.length - 1 && n < b.length - 1 && a[n] === b[n]) n++;
+    return n;
+  };
+  return found.reduce((best, n) => (shared(n.filePath) > shared(best.filePath) ? n : best), found[0]!);
 }
 
 /** `constant string c_dw = "d_x"` / `string is_dw = 'd_x'` — the literal a variable is declared with. */

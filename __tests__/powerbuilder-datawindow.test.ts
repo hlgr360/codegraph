@@ -589,3 +589,94 @@ global u_dw_future u_dw_future
     expect(flowOf('app.pbl/n_empty_reader.sru')).toEqual([]);
   });
 });
+
+describe("A report's documentation header", () => {
+  let root = '';
+  let cg: CodeGraph;
+
+  const bareDw = (name: string): string => crlf(`HA$PBExportHeader$${name}.srd\nrelease 12;\ntable(column=(type=long name=id dbname="t.id" )\n retrieve="select id from t" )\n`);
+  /** The shape of a real report script: a function whose body is a header comment, then the report's SQL. */
+  const reportScript = (name: string, header: string): string => crlf(`HA$PBExportHeader$${name}.srf
+global type ${name} from function_object
+end type
+
+forward prototypes
+global subroutine ${name} ()
+end prototypes
+
+global subroutine ${name} ();/*$ScriptEnvelope Start
+/*
+${header}
+*/
+select * from t where id = 1
+$ScriptEnvelope End*/
+end subroutine
+`);
+
+  beforeAll(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-pb-datawindow-header-'));
+    const files: Record<string, string> = {
+      // The same DataWindow name in two customers' report packages.
+      'reports/am/report/d_am_report.srd': bareDw('d_am_report'),
+      'reports/dav/report/d_am_report.srd': bareDw('d_am_report'),
+      'reports/am/report/d_am_report_nd1.srd': bareDw('d_am_report_nd1'),
+      'reports/am/report/x_am_report_sql.srf': reportScript('x_am_report_sql', `   Version     : 11.0.48
+   Date        : 2016-10-07 last change on 2017-07-12 by MI
+   report      : XCAMREP Income tax report for Belgium (Check)
+                 X_AMREP Income tax report for Belgium
+   Filename    : x_am_report.sql
+   Datawindow  : d_am_report
+                 d_am_report_nd1 (Deckblatt)
+                 Deckblatt und Anhang
+   Author      : MI
+   Comment     : #205522: Pr$$HEX1$$fc00$$ENDHEX$$fung der Steuer`),
+      // A readme: documentation with no report in it.
+      'reports/am/report/am_readme.srf': reportScript('am_readme', `   Filename    : mkg_readme.txt
+   Release notes for the package`),
+    };
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), content);
+    }
+    cg = await CodeGraph.init(root, { index: true });
+  });
+
+  afterAll(() => {
+    cg?.close();
+    if (root) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const scriptNode = (file: string) => cg.getNodesInFile(file).find((n) => n.kind === 'function')!;
+
+  it("keeps the header as the function's documentation, decoded, without the SQL", () => {
+    const doc = scriptNode('reports/am/report/x_am_report_sql.srf').docstring!;
+    expect(doc).toContain('XCAMREP Income tax report for Belgium (Check)');
+    expect(doc).toContain('X_AMREP'); // a second report code, on a continuation line
+    expect(doc).toContain('Prüfung der Steuer'); // $$HEX1$$fc00$$ENDHEX$$ is ü
+    expect(doc).not.toContain('$$HEX');
+    expect(doc).not.toContain('select * from t');
+  });
+
+  it('makes a report code searchable', () => {
+    const hits = cg.searchNodes('XCAMREP').map((r) => r.node.name);
+    expect(hits).toContain('x_am_report_sql');
+  });
+
+  it('links the DataWindow it names and the nested part on the next line, not the prose after it', () => {
+    const fn = scriptNode('reports/am/report/x_am_report_sql.srf');
+    const targets = cg.getOutgoingEdgesFrom([fn.id], ['references']).map((e) => cg.getNode(e.target)!).filter((n) => n.kind === 'component');
+    expect(targets.map((n) => n.name).sort()).toEqual(['d_am_report', 'd_am_report_nd1']);
+  });
+
+  it("picks the DataWindow in the report's own package when another package repeats the name", () => {
+    const fn = scriptNode('reports/am/report/x_am_report_sql.srf');
+    const main = cg.getOutgoingEdgesFrom([fn.id], ['references']).map((e) => cg.getNode(e.target)!).find((n) => n.name === 'd_am_report')!;
+    expect(main.filePath).toBe('reports/am/report/d_am_report.srd');
+  });
+
+  it('reads a readme as plain text: no link, no documentation block', () => {
+    const fn = scriptNode('reports/am/report/am_readme.srf');
+    expect(cg.getOutgoingEdgesFrom([fn.id], ['references']).filter((e) => cg.getNode(e.target)!.kind === 'component')).toEqual([]);
+    expect(fn.docstring ?? '').not.toContain('Release notes');
+  });
+});

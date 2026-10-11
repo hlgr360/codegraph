@@ -714,6 +714,7 @@ function extractFile(root: SyntaxNode, ctx: ExtractorContext): void {
     }
   }
   linkDataObjects(st);
+  linkReportHeader(st);
   // A user event declared on a type but given no script here is still a
   // member descendants override and callers fire (`dw.event pfc_retrieve()`).
   for (const { owner, decl } of st.declaredEvents.values()) {
@@ -771,6 +772,68 @@ function linkDataObjects(st: FileState): void {
       column: m.index! - lineStart,
     });
   }
+}
+
+// --- A report's documentation header --------------------------------------
+
+/** `Datawindow : d_x`, `Report : XCODE description`: a field of a report script's header comment. */
+const HEADER_FIELD_RE = /^\s*(?:\/\*+\s*)?([A-Za-z][A-Za-z. ]{1,24}?)\s*:\s*(.*)$/;
+const HEADER_FIELDS = new Set(['version', 'date', 'report', 'filename', 'datawindow', 'author', 'comment', 'ref.', 'changes', 'object', 'description']);
+/** Where the header ends and the script's own SQL begins. */
+const HEADER_END_RE = /^\s*(?:\/\*+\s*)?(?:select|insert|update|delete|create|alter|drop|declare|with|begin|exec|merge|truncate)\b|ScriptEnvelope End|^\s*end\s+(?:subroutine|function)\b/i;
+/** The most lines after the function header that are read as its documentation. */
+const HEADER_MAX_LINES = 70;
+const HEADER_MAX_CHARS = 2000;
+
+/** PowerBuilder writes a character outside ASCII as `$$HEX1$$fc00$$ENDHEX$$` (UTF-16 units, little-endian). */
+function decodeHexEscapes(text: string): string {
+  return text.replace(/\$\$HEX\d+\$\$([0-9a-fA-F]+)\$\$ENDHEX\$\$/g, (_m, hex: string) =>
+    (hex.match(/.{4}/g) ?? []).map((unit) => String.fromCharCode(parseInt(unit.slice(2, 4) + unit.slice(0, 2), 16))).join(''));
+}
+
+/**
+ * A report's SQL lives in a global function (`x_am_intaxbau_sql.srf`) whose body
+ * is a comment: a header that names the report code, the DataWindow(s) it
+ * belongs to, who wrote it, and what changed. Reports are started by name from
+ * a catalog in the database, so this header is the only place the project says
+ * which DataWindow a report is. It becomes the function's documentation, so a
+ * report code is searchable, and each DataWindow it names (the main one and
+ * its nested parts, one per line) is linked from the function.
+ */
+function linkReportHeader(st: FileState): void {
+  if (!/\.srf$/i.test(st.ctx.filePath)) return;
+  const fn = st.ctx.nodes.find((n) => n.kind === 'function' && n.filePath === st.ctx.filePath);
+  if (!fn) return;
+  const lines = st.ctx.source.split(/\r?\n/).slice(fn.startLine - 1, fn.startLine - 1 + HEADER_MAX_LINES);
+  const fields = new Map<string, Array<{ text: string; line: number }>>();
+  const header: string[] = [];
+  let current: string | undefined;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (HEADER_END_RE.test(line)) break;
+    const field = HEADER_FIELD_RE.exec(line);
+    const key = field?.[1]!.trim().toLowerCase();
+    if (field && key && HEADER_FIELDS.has(key)) {
+      current = key;
+      fields.set(key, [{ text: field[2]!.trim(), line: fn.startLine + i }]);
+    } else if (current && line.trim() && !/^\s*\/?\*+\/?\s*$/.test(line)) {
+      fields.get(current)!.push({ text: line.trim(), line: fn.startLine + i });
+    }
+    const cleaned = line.replace(/^\s*\/\*+\s*/, '').trimEnd();
+    if (cleaned.trim()) header.push(cleaned.trim());
+  }
+  const dataWindows = fields.get('datawindow');
+  if (!dataWindows && !fields.has('report')) return; // a readme, or a script with no header
+
+  const seen = new Set<string>();
+  for (const { text, line } of dataWindows ?? []) {
+    // The first word of each line, when it is a DataWindow's name (they all carry an underscore); a note after it is prose.
+    const name = /^[A-Za-z_][\w$#%-]*/.exec(text)?.[0];
+    if (!name || !name.includes('_') || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    st.ctx.addUnresolvedReference({ fromNodeId: fn.id, referenceName: name, referenceKind: 'references', line, column: 0 });
+  }
+  fn.docstring = decodeHexEscapes(header.join('\n')).slice(0, HEADER_MAX_CHARS);
 }
 
 export const powerbuilderExtractor: LanguageExtractor = {
