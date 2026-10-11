@@ -209,3 +209,169 @@ end function
     expect(usesFrom('app.pbl/d_orders.srd')).toEqual(['d_orders -> d_order_items']);
   });
 });
+
+describe('PowerScript that names a DataWindow without a literal', () => {
+  let root = '';
+  let cg: CodeGraph;
+
+  const bareDw = (name: string): string => crlf(`HA$PBExportHeader$${name}.srd\nrelease 12;\ntable(column=(type=long name=id dbname="t.id" )\n retrieve="select id from t" )\n`);
+
+  beforeAll(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-pb-datawindow-value-'));
+    const files: Record<string, string> = {
+      'app.pbl/d_orders.srd': bareDw('d_orders'),
+      'app.pbl/d_order_items.srd': bareDw('d_order_items'),
+      'app.pbl/d_lookup.srd': bareDw('d_lookup'),
+      // A datastore that sets its DataWindow, and a subclass that inherits it.
+      'app.pbl/u_ds_orders.sru': crlf(`global type u_ds_orders from datastore
+string dataobject = "d_orders"
+end type
+global u_ds_orders u_ds_orders
+`),
+      // A reusable base with a placeholder DataWindow, and a concrete subclass.
+      'app.pbl/u_ds_base.sru': crlf(`global type u_ds_base from datastore
+string dataobject = "d_lookup"
+end type
+global u_ds_base u_ds_base
+`),
+      'app.pbl/u_ds_leaf.sru': crlf(`global type u_ds_leaf from u_ds_base
+end type
+global u_ds_leaf u_ds_leaf
+`),
+      // What the sync dialog receives: a structure holding the datastores.
+      'app.pbl/s_parm.srs': crlf(`global type s_parm from structure
+	u_ds_orders modify_ds
+	u_ds_leaf sub_ds
+end type
+`),
+      'app.pbl/n_cst_constants.sru': crlf(`global type n_cst_constants from nonvisualobject
+end type
+global n_cst_constants n_cst_constants
+
+type variables
+constant string c_dw_items = "d_order_items"
+end variables
+`),
+      'app.pbl/app.sra': crlf(`global variables
+n_cst_constants gnv_const
+end variables
+
+global type app from application
+end type
+global app app
+`),
+      'app.pbl/w_show.srw': crlf(`global type w_show from window
+end type
+global w_show w_show
+
+type dw_work from datawindow within w_show
+string dataobject = "d_order_items"
+end type
+
+type variables
+constant string c_local = 'd_lookup'
+string is_unknown
+end variables
+
+public subroutine of_param (s_parm astr_parm);dw_1.dataobject = astr_parm.modify_ds.dataobject
+end subroutine
+
+public subroutine of_inherited (s_parm astr_parm);dw_1.dataobject = astr_parm.sub_ds.dataobject
+end subroutine
+
+public subroutine of_local ();u_ds_orders lds_in
+dw_1.dataobject = lds_in.dataobject
+end subroutine
+
+public subroutine of_other_object_constant ();dw_1.dataobject = gnv_const.c_dw_items
+end subroutine
+
+public subroutine of_own_constant ();dw_1.dataobject = c_local
+end subroutine
+
+public subroutine of_assigned_name ();string ls_name
+ls_name = 'd_order_items'
+dw_1.dataobject = ls_name
+end subroutine
+
+public subroutine of_generic_base ();u_ds_base lds_base
+dw_1.dataobject = lds_base.dataobject
+end subroutine
+
+public subroutine of_own_control ();dw_1.dataobject = dw_work.dataobject
+end subroutine
+
+public subroutine of_single_quoted ();dw_1.dataobject = 'd_orders'
+end subroutine
+
+public subroutine of_unknown ();dw_1.dataobject = is_unknown
+end subroutine
+`),
+    };
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), content);
+    }
+    cg = await CodeGraph.init(root, { index: true });
+  });
+
+  afterAll(() => {
+    cg?.close();
+    if (root) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  /** The DataWindows each function of the window points at, by function. */
+  const dataWindowsOf = (): Record<string, string[]> => {
+    const nodes = cg.getNodesInFile('app.pbl/w_show.srw');
+    const out: Record<string, string[]> = {};
+    for (const fn of nodes.filter((n) => n.kind === 'method')) {
+      out[fn.name] = cg
+        .getOutgoingEdgesFrom([fn.id], ['references'])
+        .map((e) => cg.getNode(e.target)!)
+        .filter((n) => n.kind === 'component')
+        .map((n) => n.name)
+        .sort();
+    }
+    return out;
+  };
+
+  it('reads the DataWindow a structure parameter\'s datastore sets (the dialog case)', () => {
+    expect(dataWindowsOf().of_param).toEqual(['d_orders']);
+  });
+
+  it('follows a datastore subclass up to the DataWindow it inherits', () => {
+    expect(dataWindowsOf().of_inherited).toEqual(['d_lookup']);
+  });
+
+  it("does not read a reusable base's DataWindow: a subclass or a run-time value may differ", () => {
+    expect(dataWindowsOf().of_generic_base).toEqual([]);
+  });
+
+  it('reads the DataWindow of a control written in the same file', () => {
+    expect(dataWindowsOf().of_own_control).toEqual(['d_order_items']);
+  });
+
+  it('types a local by its declaration', () => {
+    expect(dataWindowsOf().of_local).toEqual(['d_orders']);
+  });
+
+  it("reads a constant another object declares, through a global variable", () => {
+    expect(dataWindowsOf().of_other_object_constant).toEqual(['d_order_items']);
+  });
+
+  it("reads the object's own constant, whatever its quote", () => {
+    expect(dataWindowsOf().of_own_constant).toEqual(['d_lookup']);
+  });
+
+  it('reads a name the same function assigns to a variable first', () => {
+    expect(dataWindowsOf().of_assigned_name).toEqual(['d_order_items']);
+  });
+
+  it('reads a single-quoted literal', () => {
+    expect(dataWindowsOf().of_single_quoted).toEqual(['d_orders']);
+  });
+
+  it('links nothing when no DataWindow name can be found', () => {
+    expect(dataWindowsOf().of_unknown).toEqual([]);
+  });
+});

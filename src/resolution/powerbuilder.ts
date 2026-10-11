@@ -29,6 +29,7 @@
  * stay unresolved. Nothing here runs for another language.
  */
 import type { Node } from '../types';
+import { DATAOBJECT_REF } from '../extraction/languages/powerbuilder';
 import type { ResolutionContext, ResolvedRef, UnresolvedRef } from './types';
 
 const LANG = 'powerbuilder';
@@ -86,6 +87,7 @@ function declaredType(variable: Node): string | undefined {
  */
 const PB_NODES = new WeakMap<ResolutionContext, Map<string, Node[]>>();
 const PB_ANCESTRIES = new WeakMap<ResolutionContext, Map<string, Node[]>>();
+const PB_EXTENDED = new WeakMap<ResolutionContext, Set<string>>();
 
 function memo<T>(store: WeakMap<ResolutionContext, Map<string, T>>, context: ResolutionContext, key: string, compute: () => T): T {
   let map = store.get(context);
@@ -98,6 +100,7 @@ function memo<T>(store: WeakMap<ResolutionContext, Map<string, T>>, context: Res
 export function clearPowerBuilderMemos(context: ResolutionContext): void {
   PB_NODES.delete(context);
   PB_ANCESTRIES.delete(context);
+  PB_EXTENDED.delete(context);
 }
 
 function pbNodes(name: string, context: ResolutionContext): Node[] {
@@ -131,6 +134,77 @@ function findType(name: string, fromFile: string, context: ResolutionContext): N
 function findDataWindow(name: string, fromFile: string, context: ResolutionContext): Node | undefined {
   const found = pbNodes(name, context).filter((n) => n.kind === 'component');
   return found.find((n) => n.filePath === fromFile) ?? found[0];
+}
+
+/** `constant string c_dw = "d_x"` / `string is_dw = 'd_x'` — the literal a variable is declared with. */
+function initialLiteral(variable: Node): string | undefined {
+  return /=\s*(["'])([A-Za-z_][\w$#%-]*)\1\s*$/.exec(variable.signature ?? '')?.[2];
+}
+
+/** Whether some project class is declared `from` this type (lowercased names, built once per pass). */
+function isExtended(type: Node, context: ResolutionContext): boolean {
+  let parents = PB_EXTENDED.get(context);
+  if (!parents) {
+    parents = new Set();
+    for (const cls of context.getNodesByKind('class')) {
+      const parent = cls.language === LANG ? ancestorName(cls)?.toLowerCase() : undefined;
+      if (parent) parents.add(parent);
+    }
+    PB_EXTENDED.set(context, parents);
+  }
+  return parents.has(type.name.toLowerCase());
+}
+
+/**
+ * The DataWindow a type sets for itself — `string dataobject = "d_x"` in its
+ * type block, or in the nearest ancestor that has one (a datastore subclass
+ * inherits it). Read from the source: the reference from the type to its
+ * DataWindow may not be resolved yet.
+ */
+function dataObjectOf(type: Node, context: ResolutionContext): Node | undefined {
+  for (const cls of ancestry(type, context)) {
+    const lines = context.getFileLines?.(cls.filePath) ?? context.readFile(cls.filePath)?.split(/\r?\n/);
+    if (!lines) continue;
+    const block = lines.slice(cls.startLine - 1, cls.endLine).join('\n');
+    const name = /\bdataobject\s*=\s*(["'])([A-Za-z_][\w$#%-]*)\1/i.exec(block)?.[2];
+    const found = name ? findDataWindow(name, cls.filePath, context) : undefined;
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * A DataWindow named by something other than a literal (see
+ * handleDataObjectAssignment): `c_dw` or `gnv_const.c_dw_orders` read the
+ * literal the constant is declared with; `ds_in.dataobject` the DataWindow the
+ * receiver's type sets. Heuristic — the value could be changed at run time —
+ * so it carries a lower confidence than a literal.
+ */
+function resolveDataObjectValue(ref: UnresolvedRef, path: string, context: ResolutionContext): ResolvedRef | null {
+  const links = path.split('.');
+  const last = links.pop()!;
+  const from = callerClass(ref, context);
+  let target: Node | undefined;
+  if (links.length === 0) {
+    const variable = (from ? memberOutward(from, last, VARIABLE_KINDS, context) : undefined) ??
+      pbNodes(last, context).find((n) => VARIABLE_KINDS.has(n.kind) && initialLiteral(n));
+    const literal = variable ? initialLiteral(variable) : undefined;
+    target = literal ? findDataWindow(literal, ref.filePath, context) : undefined;
+  } else {
+    const type = receiverType(links, from, ref, context);
+    if (!type) return null;
+    // What a type declares is the receiver's DataWindow only when the type is
+    // concrete: a control written in this file, or a class nothing extends. A
+    // base reused by many (`u_dw_map`, default `d_map_dummy`) says nothing
+    // about the subclass or the value assigned at run time.
+    if (last.toLowerCase() === 'dataobject') target = type.filePath === ref.filePath || !isExtended(type, context) ? dataObjectOf(type, context) : undefined;
+    else {
+      const member = memberInChain(type, last, VARIABLE_KINDS, context);
+      const literal = member ? initialLiteral(member) : undefined;
+      target = literal ? findDataWindow(literal, member!.filePath, context) : undefined;
+    }
+  }
+  return target ? resolved(ref, target, 0.7) : null;
 }
 
 /**
@@ -333,6 +407,9 @@ export function matchPowerBuilderRef(ref: UnresolvedRef, context: ResolutionCont
     case 'extends':
     case 'instantiates':
     case 'references': {
+      if (ref.referenceKind === 'references' && ref.referenceName.startsWith(DATAOBJECT_REF)) {
+        return resolveDataObjectValue(ref, ref.referenceName.slice(DATAOBJECT_REF.length), context);
+      }
       // A class is never its own ancestor (see parentOf).
       const from = ref.referenceKind === 'extends' ? context.getNodeById?.(ref.fromNodeId) : undefined;
       const type = (from && TYPE_KINDS.has(from.kind) ? parentOf(from, context) : undefined) ??

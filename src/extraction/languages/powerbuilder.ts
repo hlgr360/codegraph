@@ -99,11 +99,15 @@ function maskNestedComments(source: string): string {
 }
 
 /**
- * `dw_1.dataobject = "d_x"`, a comparison against it, or a control's
- * `string dataobject = "d_x"` in its type block: the DataWindow named by a
- * literal. A name held in a variable (`dataobject = is_dw`) is not one.
+ * `dw_1.dataobject = "d_x"` (or `'d_x'` — PowerScript strings take either
+ * quote), a comparison against it, or a control's `string dataobject = "d_x"`
+ * in its type block: the DataWindow named by a literal. A name held in a
+ * variable or a constant is read from the assignment (see
+ * handleDataObjectAssignment).
  */
-const DATAOBJECT_RE = /\bdataobject\s*=\s*"([A-Za-z_][\w$#%-]*)"/gi;
+const DATAOBJECT_RE = /\bdataobject\s*=\s*(["'])([A-Za-z_][\w$#%-]*)\1/gi;
+/** What the resolver is asked to find: the value of a constant, or the DataWindow of a typed object. */
+export const DATAOBJECT_REF = 'dataobject:';
 
 /** A string argument that can only be a type name. */
 const TYPE_NAME_RE = /^[A-Za-z_][\w$#%-]*$/;
@@ -579,6 +583,51 @@ function collectLocals(header: SyntaxNode | null, block: SyntaxNode | null, st: 
   }
 }
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The DataWindow names the file itself assigns to `target` (a variable, a constant or `x.dataobject`), in order. */
+function literalsAssignedTo(target: string, source: string): string[] {
+  const re = new RegExp(`(?:^|[^\\w$#%.-])${escapeRegExp(target)}\\s*=\\s*(["'])([A-Za-z_][\\w$#%-]*)\\1`, 'gim');
+  const names: string[] = [];
+  for (const m of source.matchAll(re)) if (!names.includes(m[2]!)) names.push(m[2]!);
+  return names;
+}
+
+/**
+ * `dw.dataobject = ls_dw`, `= c_dw_orders`, `= gnv_const.c_dw_orders`,
+ * `= ds_in.dataobject`: a DataWindow named by something other than a literal.
+ *
+ * When the file itself assigns a DataWindow name to that variable or constant
+ * (`ls_dw = 'd_x'`, `constant string c_dw = 'd_x'`, `ds_in.dataobject =
+ * 'd_x'`), those are the DataWindows. Otherwise the reference is left for the
+ * resolver (`dataobject:` + the receiver path, typed as for calls), which reads
+ * the constant another object declares or the DataWindow the receiver's type
+ * sets: that is how a dialog that shows whatever DataWindow its datastore
+ * parameter holds links to it.
+ */
+function handleDataObjectAssignment(stmt: SyntaxNode, fn: Node, owner: Node | null, st: FileState): void {
+  const { source } = st.ctx;
+  const target = child(stmt, 'l_value')?.namedChildren[0];
+  const field = target?.type === 'field_access' ? child(target, 'field_name') : null;
+  if (!field || getNodeText(field, source).trim().toLowerCase() !== 'dataobject') return;
+  const value = child(stmt, 'r_value')?.namedChildren[0];
+  const expression = value?.type === 'l_value_expression' ? value.namedChildren[0] : undefined;
+  if (!expression) return; // a literal is read by linkDataObjects; a call or a concatenation is not followed
+
+  const written = getNodeText(expression, source).trim().replace(/\s+/g, '');
+  const last = expression.type === 'field_access' ? getNodeText(child(expression, 'field_name') ?? expression, source).trim() : written;
+  if (expression.type !== 'identifier_expression' && expression.type !== 'field_access') return;
+
+  const literals = literalsAssignedTo(written, source);
+  if (literals.length === 0 && expression.type === 'field_access' && last.toLowerCase() !== 'dataobject') literals.push(...literalsAssignedTo(last, source));
+  if (literals.length > 0) {
+    for (const name of literals) addRef(st, fn.id, name, 'references', stmt);
+    return;
+  }
+  const path = receiverPath(expression, owner, st);
+  if (path && path !== UNTYPED_RECEIVER && !path.includes(UNTYPED_RECEIVER)) addRef(st, fn.id, DATAOBJECT_REF + path, 'references', stmt);
+}
+
 function walkBody(node: SyntaxNode, fn: Node, owner: Node | null, st: FileState): void {
   for (const c of node.namedChildren) {
     switch (c.type) {
@@ -590,6 +639,9 @@ function walkBody(node: SyntaxNode, fn: Node, owner: Node | null, st: FileState)
         break;
       case 'create_statement':
         handleCreate(c, fn, st);
+        break;
+      case 'assignment_statement':
+        handleDataObjectAssignment(c, fn, owner, st);
         break;
       case 'local_variable_declaration': {
         const type = child(c, 'variable_type');
@@ -708,12 +760,12 @@ function linkDataObjects(st: FileState): void {
     }
     const from = owner ?? st.main;
     if (!from) continue;
-    const key = `${from.id}\0${m[1]!.toLowerCase()}`;
+    const key = `${from.id}\0${m[2]!.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     st.ctx.addUnresolvedReference({
       fromNodeId: from.id,
-      referenceName: m[1]!,
+      referenceName: m[2]!,
       referenceKind: 'references',
       line,
       column: m.index! - lineStart,
