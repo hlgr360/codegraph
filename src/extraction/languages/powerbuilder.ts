@@ -49,6 +49,55 @@ const OPEN_FUNCTIONS = new Set([
 const SCOPED_EVENT_RE = /^([ \t]*event[ \t]+(?:type[ \t]+[\w$#%-]+[ \t]+)?[A-Za-z_#][\w$#%-]*)::(?=[A-Za-z_#])/gim;
 const SCOPED_EVENT_MARK = '$$';
 
+/**
+ * PowerScript block comments nest, but the grammar's comment token ends at the
+ * first closing delimiter. A script that wraps its body in a `$ScriptEnvelope`
+ * comment and holds a block comment of its own (a release-notes function, a
+ * long SQL script) therefore leaves the rest of the outer comment as stray
+ * text, and the whole function is lost to an ERROR node. Blank the delimiters
+ * of every comment nested inside another so the outer one is a single flat
+ * comment. Same length, so every offset stays valid; a source with no nested
+ * comment comes back unchanged. Text in a string or after a line comment's
+ * double slash is not a comment, so an opening delimiter there opens nothing.
+ */
+function maskNestedComments(source: string): string {
+  if (!source.includes('/*')) return source;
+  const out = source.split('');
+  const n = source.length;
+  let depth = 0;
+  let i = 0;
+  while (i < n) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (depth === 0) {
+      if (c === '/' && next === '*') {
+        depth = 1;
+        i += 2;
+      } else if (c === '/' && next === '/') {
+        while (i < n && source[i] !== '\n') i++;
+      } else if (c === '"' || c === "'") {
+        // A string ends at its quote or its line; `~` escapes the next character.
+        i++;
+        while (i < n && source[i] !== '\n' && source[i] !== c) i += source[i] === '~' ? 2 : 1;
+        i++;
+      } else {
+        i++;
+      }
+    } else if (c === '/' && next === '*') {
+      out[i] = out[i + 1] = ' ';
+      depth++;
+      i += 2;
+    } else if (c === '*' && next === '/') {
+      depth--;
+      if (depth > 0) out[i] = out[i + 1] = ' ';
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+  return out.join('');
+}
+
 /** A string argument that can only be a type name. */
 const TYPE_NAME_RE = /^[A-Za-z_][\w$#%-]*$/;
 
@@ -618,8 +667,10 @@ function extractFile(root: SyntaxNode, ctx: ExtractorContext): void {
 }
 
 export const powerbuilderExtractor: LanguageExtractor = {
-  // A replacer function: in a replacement string `$$` would collapse to `$`.
-  preParse: (source) => source.replace(SCOPED_EVENT_RE, (_m, head: string) => head + SCOPED_EVENT_MARK),
+  // Both rewrites keep the source's length. The `::` one takes a replacer
+  // function: in a replacement string `$$` would collapse to `$`.
+  preParse: (source) =>
+    maskNestedComments(source).replace(SCOPED_EVENT_RE, (_m, head: string) => head + SCOPED_EVENT_MARK),
   functionTypes: [],
   classTypes: [],
   methodTypes: [],
