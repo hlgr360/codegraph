@@ -28,7 +28,9 @@
  * and system classes (`window`, `nonvisualobject`) are not in the index and
  * stay unresolved. Nothing here runs for another language.
  */
-import type { Node } from '../types';
+import type { Edge, Node } from '../types';
+import type { QueryBuilder } from '../db/queries';
+import type { MaybeYield } from './cooperative-yield';
 import { DATAOBJECT_REF } from '../extraction/languages/powerbuilder';
 import type { ResolutionContext, ResolvedRef, UnresolvedRef } from './types';
 
@@ -420,4 +422,109 @@ export function matchPowerBuilderRef(ref: UnresolvedRef, context: ResolutionCont
     default:
       return null;
   }
+}
+
+// --- A DataWindow handed to a dialog through a structure --------------------
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The class whose script holds `node`: the node itself when it is one. */
+function owningClassOf(node: Node, context: ResolutionContext): Node | undefined {
+  if (TYPE_KINDS.has(node.kind)) return node;
+  const owner = ownerName(node);
+  if (!owner) return undefined;
+  const lower = owner.toLowerCase();
+  return pbNodes(owner, context).find((n) => TYPE_KINDS.has(n.kind) && n.filePath === node.filePath && n.name.toLowerCase() === lower);
+}
+
+/** The project type `name` is declared with in `text` (`u_ds_orders ds_a`), when it is one of `kinds`. */
+function declaredProjectType(name: string, text: string, kinds: ReadonlySet<string>, context: ResolutionContext): Node | undefined {
+  const re = new RegExp(`(?:^|[\\s,(;])([A-Za-z_][\\w$#%-]*)\\s+${escapeRegExp(name)}\\b(?!\\s*[(.])`, 'gi');
+  for (const m of text.matchAll(re)) {
+    const found = pbNodes(m[1]!, context).find((n) => kinds.has(n.kind));
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * A DataWindow a dialog shows through a structure its opener fills in.
+ *
+ * `dw_1.dataobject = lstr.modify_ds.dataobject` in a dialog types `lstr` as a
+ * structure whose `modify_ds` is declared as the system `datastore`: the
+ * DataWindow is whatever the opener put there. The resolver leaves that
+ * reference open (`dataobject:` + the typed path). Here it is completed from
+ * the code that opens the dialog, and only from there:
+ *
+ *   - the function that opens the window — `OpenWithParm(w_dialog, lstr_parm)`
+ *     — passing a variable declared as that structure,
+ *   - the assignment, in the same function, of an object to that field
+ *     (`lstr_parm.modify_ds = ds_a`),
+ *   - the DataWindow that object's type sets (the type it is `create`d as, or
+ *     else the one it is declared with when nothing extends it).
+ *
+ * Several openers each contribute their own DataWindow: the dialog can show any
+ * of them. An assignment somewhere else in the project, or one that feeds a
+ * different window, is never counted — the structure is a carrier, and the
+ * window it is passed to says which flow is meant.
+ */
+export async function pbDataObjectFlowEdges(queries: QueryBuilder, context: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
+  const edges = new Map<string, Edge>();
+  let scanned = 0;
+  for (const ref of queries.getUnresolvedByNamePrefix(DATAOBJECT_REF)) {
+    if ((++scanned & 63) === 0) await onYield();
+    if (ref.language !== LANG || ref.referenceKind !== 'references') continue;
+    const links = ref.referenceName.slice(DATAOBJECT_REF.length).split('.');
+    if (links.length !== 3 || links[2]!.toLowerCase() !== 'dataobject') continue;
+    const [structName, field] = links as [string, string, string];
+    const struct = pbNodes(structName, context).find((n) => n.kind === 'struct');
+    const consumer = queries.getNodeById(ref.fromNodeId);
+    const owner = consumer ? owningClassOf(consumer, context) : undefined;
+    if (!struct || !consumer || !owner) continue;
+
+    // The dialog is the nearest class around the script that something opens.
+    for (let dialog: Node | undefined = owner; dialog; dialog = containerOf(dialog, context)) {
+      const openers = queries.getIncomingEdges(dialog.id, ['instantiates']);
+      if (openers.length === 0) continue;
+      for (const open of openers) {
+        const opener = queries.getNodeById(open.source);
+        const lines = opener ? context.getFileLines?.(opener.filePath) ?? context.readFile(opener.filePath)?.split(/\r?\n/) : undefined;
+        if (!opener || !lines) continue;
+        const text = lines.slice(opener.startLine - 1, opener.endLine).join('\n');
+        const passed = new RegExp(`\\bOpen\\w*WithParm\\s*\\(\\s*${escapeRegExp(dialog.name)}\\s*,\\s*([A-Za-z_][\\w$#%-]*)`, 'gi');
+        for (const parm of text.matchAll(passed)) {
+          if (declaredProjectType(parm[1]!, text, new Set(['struct']), context)?.id !== struct.id) continue;
+          const assigned = new RegExp(`(?:^|[^\\w$#%.-])${escapeRegExp(parm[1]!)}\\s*\\.\\s*${escapeRegExp(field)}\\s*=\\s*([A-Za-z_][\\w$#%-]*)\\s*(?:\\r?\\n|$|//)`, 'gim');
+          for (const value of text.matchAll(assigned)) {
+            const object = value[1]!;
+            const created = new RegExp(`(?:^|[^\\w$#%.-])${escapeRegExp(object)}\\s*=\\s*create\\s+(?:using\\s+)?([A-Za-z_][\\w$#%-]*)`, 'i').exec(text)?.[1];
+            const exact = created ? pbNodes(created, context).find((n) => TYPE_KINDS.has(n.kind)) : undefined;
+            const declared = exact ?? declaredProjectType(object, text, TYPE_KINDS, context);
+            // A created type is what the object is; a declared one may be a base a subclass stands in for.
+            const type = exact ?? (declared && !isExtended(declared, context) ? declared : undefined);
+            const target = type ? dataObjectOf(type, context) : undefined;
+            if (!target) continue;
+            const key = `${consumer.id}\0${target.id}`;
+            if (edges.has(key)) continue;
+            edges.set(key, {
+              source: consumer.id,
+              target: target.id,
+              kind: 'references',
+              line: ref.line,
+              column: ref.column,
+              provenance: 'heuristic',
+              metadata: {
+                synthesizedBy: 'pb-dataobject-flow',
+                registeredAt: `${opener.filePath}:${open.line ?? opener.startLine}`,
+                via: `${struct.name}.${field}`,
+                opener: opener.name,
+              },
+            });
+          }
+        }
+      }
+      break;
+    }
+  }
+  return [...edges.values()];
 }

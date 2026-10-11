@@ -3505,6 +3505,28 @@ export class QueryBuilder {
   }
 
   /**
+   * Unresolved references whose name starts with `prefix`, pending or failed.
+   * For a synthesizer that reads a reference the resolver deliberately leaves
+   * open (a PowerScript `dataobject:` reference a later pass completes) without
+   * loading every unresolved row.
+   */
+  getUnresolvedByNamePrefix(prefix: string): UnresolvedReference[] {
+    const pattern = prefix.replace(/[*?[]/g, (c) => `[${c}]`) + '*';
+    const rows = this.db.prepare('SELECT * FROM unresolved_refs WHERE reference_name GLOB ?').all(pattern) as UnresolvedRefRow[];
+    return rows.map((row) => ({
+      fromNodeId: row.from_node_id,
+      referenceName: row.reference_name,
+      referenceKind: row.reference_kind as EdgeKind,
+      line: row.line,
+      column: row.col,
+      candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      filePath: row.file_path,
+      language: row.language as Language,
+      rowId: row.id,
+    }));
+  }
+
+  /**
    * Get all unresolved references
    */
   getUnresolvedReferences(): UnresolvedReference[] {

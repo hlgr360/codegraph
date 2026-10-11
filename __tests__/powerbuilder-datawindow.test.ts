@@ -375,3 +375,116 @@ end subroutine
     expect(dataWindowsOf().of_unknown).toEqual([]);
   });
 });
+
+describe('A dialog that receives its DataWindow through a structure', () => {
+  let root = '';
+  let cg: CodeGraph;
+
+  const bareDw = (name: string): string => crlf(`HA$PBExportHeader$${name}.srd\nrelease 12;\ntable(column=(type=long name=id dbname="t.id" )\n retrieve="select id from t" )\n`);
+  const datastore = (name: string, dw: string): string => crlf(`global type ${name} from datastore\nstring dataobject = "${dw}"\nend type\nglobal ${name} ${name}\n`);
+  // Reads the structure's datastore: which DataWindow depends on who opened it.
+  const dialog = (name: string): string => crlf(`global type ${name} from window
+end type
+global ${name} ${name}
+
+public subroutine of_show_modify ();s_carrier lstr
+lstr = Message.PowerObjectParm
+dw_1.dataobject = lstr.modify_ds.dataobject
+end subroutine
+
+public subroutine of_show_delete ();s_carrier lstr
+lstr = Message.PowerObjectParm
+dw_1.dataobject = lstr.delete_ds.dataobject
+end subroutine
+`);
+  const opener = (name: string, window: string, body: string): string => crlf(`global type ${name} from nonvisualobject
+end type
+global ${name} ${name}
+
+public subroutine of_open ();s_carrier lstr_parm
+${body}
+OpenWithParm(${window}, lstr_parm)
+end subroutine
+`);
+
+  beforeAll(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-pb-datawindow-flow-'));
+    const files: Record<string, string> = {
+      'app.pbl/d_orders.srd': bareDw('d_orders'),
+      'app.pbl/d_items.srd': bareDw('d_items'),
+      'app.pbl/d_lookup.srd': bareDw('d_lookup'),
+      'app.pbl/d_third.srd': bareDw('d_third'),
+      'app.pbl/u_ds_orders.sru': datastore('u_ds_orders', 'd_orders'),
+      'app.pbl/u_ds_items.sru': datastore('u_ds_items', 'd_items'),
+      'app.pbl/u_ds_lookup.sru': datastore('u_ds_lookup', 'd_lookup'),
+      'app.pbl/u_ds_third.sru': datastore('u_ds_third', 'd_third'),
+      // The carrier: its fields are the system datastore, so the type says nothing.
+      'app.pbl/s_carrier.srs': crlf(`global type s_carrier from structure
+	datastore modify_ds
+	datastore delete_ds
+end type
+`),
+      'app.pbl/w_dialog.srw': dialog('w_dialog'),
+      'app.pbl/w_other.srw': dialog('w_other'),
+      'app.pbl/w_nobody.srw': dialog('w_nobody'),
+      // Two openers of w_dialog, each with its own datastores.
+      'app.pbl/n_open_a.sru': opener('n_open_a', 'w_dialog', `u_ds_orders ds_m
+u_ds_items ds_d
+ds_m = create u_ds_orders
+ds_d = create u_ds_items
+lstr_parm.modify_ds = ds_m
+lstr_parm.delete_ds = ds_d`),
+      'app.pbl/n_open_b.sru': opener('n_open_b', 'w_dialog', `u_ds_lookup ds_o
+ds_o = create u_ds_lookup
+lstr_parm.modify_ds = ds_o`),
+      // An unrelated flow through the same structure: it feeds w_other, never w_dialog.
+      'app.pbl/n_open_other.sru': opener('n_open_other', 'w_other', `u_ds_third ds_t
+ds_t = create u_ds_third
+lstr_parm.modify_ds = ds_t`),
+    };
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), content);
+    }
+    cg = await CodeGraph.init(root, { index: true });
+  });
+
+  afterAll(() => {
+    cg?.close();
+    if (root) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  /** The DataWindows a dialog's function points at through the structure, with how each link was made. */
+  const flowFrom = (file: string, fn: string): Array<{ dw: string; by?: unknown; via?: unknown; opener?: unknown }> => {
+    const node = cg.getNodesInFile(file).find((n) => n.kind === 'method' && n.name === fn)!;
+    return cg
+      .getOutgoingEdgesFrom([node.id], ['references'])
+      .filter((e) => e.provenance === 'heuristic')
+      .map((e) => ({ dw: cg.getNode(e.target)!.name, by: e.metadata?.synthesizedBy, via: e.metadata?.via, opener: e.metadata?.opener }))
+      .sort((a, b) => a.dw.localeCompare(b.dw));
+  };
+
+  it('links the dialog to the DataWindow its opener puts in the field, and says where it came from', () => {
+    expect(flowFrom('app.pbl/w_dialog.srw', 'of_show_delete')).toEqual([
+      { dw: 'd_items', by: 'pb-dataobject-flow', via: 's_carrier.delete_ds', opener: 'of_open' },
+    ]);
+  });
+
+  it('counts every opener: the dialog can show any of them', () => {
+    expect(flowFrom('app.pbl/w_dialog.srw', 'of_show_modify').map((l) => l.dw)).toEqual(['d_lookup', 'd_orders']);
+  });
+
+  it('keeps the flow of another dialog out', () => {
+    // w_other is fed by n_open_other only; its datastore never reaches w_dialog.
+    expect(flowFrom('app.pbl/w_other.srw', 'of_show_modify').map((l) => l.dw)).toEqual(['d_third']);
+    expect(flowFrom('app.pbl/w_dialog.srw', 'of_show_modify').map((l) => l.dw)).not.toContain('d_third');
+  });
+
+  it('is specific to the field: an opener that fills only modify_ds says nothing about delete_ds', () => {
+    expect(flowFrom('app.pbl/w_other.srw', 'of_show_delete')).toEqual([]);
+  });
+
+  it('links nothing for a dialog nobody opens', () => {
+    expect(flowFrom('app.pbl/w_nobody.srw', 'of_show_modify')).toEqual([]);
+  });
+});

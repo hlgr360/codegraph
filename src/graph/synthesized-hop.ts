@@ -73,6 +73,8 @@ export function describeSynthesizedHop(edge: Edge | null | undefined): Synthesiz
       return hop(`runs ${quoted(m.field, 'a collection')} handlers`);
     case 'fn-pointer-dispatch':
       return hop(`fn-pointer ${m.via ? String(m.via) : ''}`);
+    case 'pb-dataobject-flow':
+      return hop(`DataWindow handed in by ${quoted(m.opener, 'the opening code')}`, m.via ? ` through \`${String(m.via)}\`` : '');
     case 'goframe-route':
       return hop(`GoFrame route ${m.route ? String(m.route) : ''}`);
     default:
