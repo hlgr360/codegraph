@@ -488,3 +488,104 @@ lstr_parm.modify_ds = ds_t`),
     expect(flowFrom('app.pbl/w_nobody.srw', 'of_show_modify')).toEqual([]);
   });
 });
+
+describe('A DataWindow control handed down through a structure', () => {
+  let root = '';
+  let cg: CodeGraph;
+
+  const bareDw = (name: string): string => crlf(`HA$PBExportHeader$${name}.srd\nrelease 12;\ntable(column=(type=long name=id dbname="t.id" )\n retrieve="select id from t" )\n`);
+  /** A DataWindow control class that fills `field` of the structure with itself, from a function of its own. */
+  const control = (name: string, parent: string, dw: string | null, struct: string, field: string, extra = ''): string => crlf(`global type ${name} from ${parent}
+${dw ? `string dataobject = "${dw}"\n` : ''}end type
+global ${name} ${name}
+
+public subroutine of_validate ();${struct} lstr
+${extra}lstr.${field} = THIS
+end subroutine
+`);
+  /** A helper that reads the DataWindow of the control it is handed. */
+  const helper = (name: string, struct: string, field: string): string => crlf(`global type ${name} from nonvisualobject
+end type
+global ${name} ${name}
+
+public subroutine of_copy (ref ${struct} check);datastore ds_a
+ds_a.dataobject = check.${field}.dataobject
+end subroutine
+`);
+  const struct = (name: string, field: string): string => crlf(`global type ${name} from structure
+	string msg
+	datawindow ${field}
+end type
+`);
+
+  beforeAll(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-pb-datawindow-control-'));
+    const files: Record<string, string> = {
+      'app.pbl/d_address.srd': bareDw('d_address'),
+      'app.pbl/d_person.srd': bareDw('d_person'),
+      'app.pbl/d_future.srd': bareDw('d_future'),
+      'app.pbl/d_shared.srd': bareDw('d_shared'),
+      // The private carrier: two control classes fill it, one has a subclass with its own DataWindow.
+      'app.pbl/s_check.srs': struct('s_check', 'in_dw'),
+      'app.pbl/u_dw_address.sru': control('u_dw_address', 'datawindow', 'd_address', 's_check', 'in_dw'),
+      'app.pbl/u_dw_person.sru': control('u_dw_person', 'datawindow', 'd_person', 's_check', 'in_dw'),
+      'app.pbl/u_dw_future.sru': crlf(`global type u_dw_future from u_dw_address
+string dataobject = "d_future"
+end type
+global u_dw_future u_dw_future
+`),
+      // Another structure with a field of the same name, filled by a control that is no business of s_check's.
+      'app.pbl/s_other.srs': struct('s_other', 'in_dw'),
+      'app.pbl/u_dw_other.sru': control('u_dw_other', 'datawindow', 'd_shared', 's_other', 'in_dw'),
+      'app.pbl/n_country.sru': helper('n_country', 's_check', 'in_dw'),
+      // A carrier thirteen unrelated classes fill is shared, and says nothing about its reader.
+      'app.pbl/s_shared.srs': struct('s_shared', 'in_dw'),
+      'app.pbl/n_shared_reader.sru': helper('n_shared_reader', 's_shared', 'in_dw'),
+      // A field nothing fills.
+      'app.pbl/s_empty.srs': struct('s_empty', 'in_dw'),
+      'app.pbl/n_empty_reader.sru': helper('n_empty_reader', 's_empty', 'in_dw'),
+    };
+    for (let i = 1; i <= 13; i++) files[`app.pbl/u_dw_p${i}.sru`] = control(`u_dw_p${i}`, 'datawindow', 'd_shared', 's_shared', 'in_dw');
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), content);
+    }
+    cg = await CodeGraph.init(root, { index: true });
+  });
+
+  afterAll(() => {
+    cg?.close();
+    if (root) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const flowOf = (file: string): Array<{ dw: string; via: unknown; by: unknown }> => {
+    const fn = cg.getNodesInFile(file).find((n) => n.kind === 'method' && n.name === 'of_copy')!;
+    return cg
+      .getOutgoingEdgesFrom([fn.id], ['references'])
+      .filter((e) => e.provenance === 'heuristic')
+      .map((e) => ({ dw: cg.getNode(e.target)!.name, via: e.metadata?.via, by: e.metadata?.synthesizedBy }))
+      .sort((a, b) => a.dw.localeCompare(b.dw));
+  };
+
+  it("links the reader to the DataWindow of every class that fills the field, and of its subclasses", () => {
+    expect(flowOf('app.pbl/n_country.sru')).toEqual([
+      { dw: 'd_address', via: 's_check.in_dw', by: 'pb-dataobject-flow' },
+      { dw: 'd_future', via: 's_check.in_dw', by: 'pb-dataobject-flow' }, // u_dw_future extends u_dw_address
+      { dw: 'd_person', via: 's_check.in_dw', by: 'pb-dataobject-flow' },
+    ]);
+  });
+
+  it('does not count a control that fills another structure\'s field of the same name', () => {
+    const dws = flowOf('app.pbl/n_country.sru').map((l) => l.dw);
+    expect(dws).toContain('d_address'); // the link exists, so the absence below means something
+    expect(dws).not.toContain('d_shared');
+  });
+
+  it('leaves a shared carrier alone: thirteen unrelated classes fill it', () => {
+    expect(flowOf('app.pbl/n_shared_reader.sru')).toEqual([]);
+  });
+
+  it('links nothing when no control fills the field', () => {
+    expect(flowOf('app.pbl/n_empty_reader.sru')).toEqual([]);
+  });
+});

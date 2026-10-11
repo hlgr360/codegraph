@@ -163,8 +163,8 @@ function isExtended(type: Node, context: ResolutionContext): boolean {
  * inherits it). Read from the source: the reference from the type to its
  * DataWindow may not be resolved yet.
  */
-function dataObjectOf(type: Node, context: ResolutionContext): Node | undefined {
-  for (const cls of ancestry(type, context)) {
+function dataObjectOf(type: Node, context: ResolutionContext, inherited = true): Node | undefined {
+  for (const cls of inherited ? ancestry(type, context) : [type]) {
     const lines = context.getFileLines?.(cls.filePath) ?? context.readFile(cls.filePath)?.split(/\r?\n/);
     if (!lines) continue;
     const block = lines.slice(cls.startLine - 1, cls.endLine).join('\n');
@@ -447,6 +447,76 @@ function declaredProjectType(name: string, text: string, kinds: ReadonlySet<stri
   return undefined;
 }
 
+/** The most different classes that may fill one structure field before it counts as a shared carrier. */
+const MAX_FIELD_PRODUCERS = 12;
+/** The most DataWindows one control family may set before the answer is too diffuse to be one. */
+const MAX_FAMILY_DATAWINDOWS = 40;
+
+interface FieldProducer {
+  /** The control class that puts itself (or a control of its own) into the field. */
+  control: Node;
+  file: string;
+  line: number;
+}
+
+/** Classes by the lowercased name of the class they are declared `from`, built once per pass. */
+function childrenByParent(context: ResolutionContext): Map<string, Node[]> {
+  const children = new Map<string, Node[]>();
+  for (const cls of context.getNodesByKind('class')) {
+    const parent = cls.language === LANG ? ancestorName(cls)?.toLowerCase() : undefined;
+    if (!parent) continue;
+    const list = children.get(parent) ?? [];
+    list.push(cls);
+    children.set(parent, list);
+  }
+  return children;
+}
+
+/**
+ * Every place a control is put into a structure's field — `check_country.in_dw
+ * = THIS`, or a control written in the same file — for the given (structure
+ * field) pairs, in one pass over the project's PowerScript sources. The
+ * variable must be declared as that structure in the same function, so another
+ * structure with a field of the same name is not mistaken for it.
+ */
+function findFieldProducers(wanted: Map<string, { struct: Node; field: string }>, context: ResolutionContext): Map<string, FieldProducer[]> {
+  const found = new Map<string, FieldProducer[]>();
+  if (wanted.size === 0) return found;
+  const fields = [...new Set([...wanted.values()].map((w) => escapeRegExp(w.field)))];
+  const assignment = new RegExp(`([A-Za-z_][\\w$#%-]*)\\s*\\.\\s*(${fields.join('|')})\\s*=\\s*([A-Za-z_][\\w$#%-]*)\\s*(?:\\r?\\n|$|//)`, 'gi');
+  const probe = new RegExp(`\\.\\s*(?:${fields.join('|')})\\s*=`, 'i');
+  for (const file of context.getAllFiles()) {
+    if (!/\.(sru|srw|srf|sra|srm)$/i.test(file)) continue;
+    const source = context.readFile(file);
+    if (!source || !probe.test(source)) continue;
+    const lines = source.split(/\r?\n/);
+    const nodes = context.getNodesInFile(file);
+    for (const m of source.matchAll(assignment)) {
+      const line = source.slice(0, m.index).split('\n').length;
+      if (source.slice(source.lastIndexOf('\n', m.index) + 1, m.index).includes('//')) continue; // commented out
+      let around: Node | undefined;
+      for (const n of nodes) {
+        if (n.kind === 'file' || n.startLine > line || n.endLine < line) continue;
+        if (!around || n.endLine - n.startLine <= around.endLine - around.startLine) around = n;
+      }
+      const owner = around ? owningClassOf(around, context) : undefined;
+      if (!around || !owner) continue;
+      const text = lines.slice(around.startLine - 1, around.endLine).join('\n');
+      const value = m[3]!.toLowerCase();
+      const control = value === 'this' ? owner : pbNodes(value, context).find((n) => TYPE_KINDS.has(n.kind) && n.filePath === file);
+      if (!control) continue;
+      for (const [key, w] of wanted) {
+        if (w.field.toLowerCase() !== m[2]!.toLowerCase()) continue;
+        if (declaredProjectType(m[1]!, text, new Set(['struct']), context)?.id !== w.struct.id) continue;
+        const list = found.get(key) ?? [];
+        list.push({ control, file, line });
+        found.set(key, list);
+      }
+    }
+  }
+  return found;
+}
+
 /**
  * A DataWindow a dialog shows through a structure its opener fills in.
  *
@@ -470,6 +540,7 @@ function declaredProjectType(name: string, text: string, kinds: ReadonlySet<stri
  */
 export async function pbDataObjectFlowEdges(queries: QueryBuilder, context: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
   const edges = new Map<string, Edge>();
+  const controlRefs: Array<{ consumer: Node; struct: Node; field: string; line: number; column: number }> = [];
   let scanned = 0;
   for (const ref of queries.getUnresolvedByNamePrefix(DATAOBJECT_REF)) {
     if ((++scanned & 63) === 0) await onYield();
@@ -481,6 +552,7 @@ export async function pbDataObjectFlowEdges(queries: QueryBuilder, context: Reso
     const consumer = queries.getNodeById(ref.fromNodeId);
     const owner = consumer ? owningClassOf(consumer, context) : undefined;
     if (!struct || !consumer || !owner) continue;
+    const before = edges.size;
 
     // The dialog is the nearest class around the script that something opens.
     for (let dialog: Node | undefined = owner; dialog; dialog = containerOf(dialog, context)) {
@@ -524,6 +596,65 @@ export async function pbDataObjectFlowEdges(queries: QueryBuilder, context: Reso
         }
       }
       break;
+    }
+
+    // Nothing opened it with this structure: a field that is itself a DataWindow
+    // control is filled by the control putting itself there.
+    const member = pbNodes(field, context).find((n) => n.kind === 'field' && n.filePath === struct.filePath && ownerName(n)?.toLowerCase() === struct.name.toLowerCase());
+    if (edges.size === before && /^datawindow\b/i.test(member?.signature ?? '')) {
+      controlRefs.push({ consumer, struct, field, line: ref.line, column: ref.column });
+    }
+  }
+
+  // A control a structure's field is handed carries the DataWindow its class
+  // sets, and any subclass of it sets its own: the helper reading the field
+  // works on each of them. A field many unrelated classes fill is a shared
+  // carrier and is left alone.
+  const wanted = new Map(controlRefs.map((r) => [`${r.struct.id}\0${r.field.toLowerCase()}`, { struct: r.struct, field: r.field }]));
+  const producers = findFieldProducers(wanted, context);
+  const children = controlRefs.length > 0 ? childrenByParent(context) : new Map<string, Node[]>();
+  for (const r of controlRefs) {
+    const list = producers.get(`${r.struct.id}\0${r.field.toLowerCase()}`) ?? [];
+    const controls = [...new Map(list.map((p) => [p.control.id, p.control])).values()];
+    if (controls.length === 0 || controls.length > MAX_FIELD_PRODUCERS) continue;
+    const targets = new Map<string, Node>();
+    for (const control of controls) {
+      const own = dataObjectOf(control, context);
+      if (own) targets.set(own.id, own);
+      const seen = new Set([control.id]);
+      for (let queue = [control], depth = 0; queue.length > 0 && depth < 8; depth++) {
+        const next: Node[] = [];
+        for (const parent of queue) {
+          for (const child of children.get(parent.name.toLowerCase()) ?? []) {
+            if (seen.has(child.id)) continue;
+            seen.add(child.id);
+            next.push(child);
+            const sub = dataObjectOf(child, context, false);
+            if (sub) targets.set(sub.id, sub);
+          }
+        }
+        queue = next;
+      }
+    }
+    if (targets.size === 0 || targets.size > MAX_FAMILY_DATAWINDOWS) continue;
+    const at = list.find((p) => p.control.id === controls[0]!.id)!;
+    for (const target of targets.values()) {
+      const key = `${r.consumer.id}\0${target.id}`;
+      if (edges.has(key)) continue;
+      edges.set(key, {
+        source: r.consumer.id,
+        target: target.id,
+        kind: 'references',
+        line: r.line,
+        column: r.column,
+        provenance: 'heuristic',
+        metadata: {
+          synthesizedBy: 'pb-dataobject-flow',
+          registeredAt: `${at.file}:${at.line}`,
+          via: `${r.struct.name}.${r.field}`,
+          opener: controls.map((c) => c.name).join(', '),
+        },
+      });
     }
   }
   return [...edges.values()];
