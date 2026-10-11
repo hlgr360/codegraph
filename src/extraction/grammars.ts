@@ -182,6 +182,8 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.srm': 'powerbuilder',
   '.srf': 'powerbuilder',
   '.srs': 'powerbuilder',
+  // A DataWindow is not PowerScript: DataWindowExtractor reads it (columns, SQL).
+  '.srd': 'powerbuilder',
 };
 
 /** MPEG transport stream: fixed 188-byte packets, each opening with 0x47. */

@@ -98,6 +98,17 @@ function maskNestedComments(source: string): string {
   return out.join('');
 }
 
+/**
+ * `dw_1.dataobject = "d_x"` (or `'d_x'` — PowerScript strings take either
+ * quote), a comparison against it, or a control's `string dataobject = "d_x"`
+ * in its type block: the DataWindow named by a literal. A name held in a
+ * variable or a constant is read from the assignment (see
+ * handleDataObjectAssignment).
+ */
+const DATAOBJECT_RE = /\bdataobject\s*=\s*(["'])([A-Za-z_][\w$#%-]*)\1/gi;
+/** What the resolver is asked to find: the value of a constant, or the DataWindow of a typed object. */
+export const DATAOBJECT_REF = 'dataobject:';
+
 /** A string argument that can only be a type name. */
 const TYPE_NAME_RE = /^[A-Za-z_][\w$#%-]*$/;
 
@@ -572,6 +583,51 @@ function collectLocals(header: SyntaxNode | null, block: SyntaxNode | null, st: 
   }
 }
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The DataWindow names the file itself assigns to `target` (a variable, a constant or `x.dataobject`), in order. */
+function literalsAssignedTo(target: string, source: string): string[] {
+  const re = new RegExp(`(?:^|[^\\w$#%.-])${escapeRegExp(target)}\\s*=\\s*(["'])([A-Za-z_][\\w$#%-]*)\\1`, 'gim');
+  const names: string[] = [];
+  for (const m of source.matchAll(re)) if (!names.includes(m[2]!)) names.push(m[2]!);
+  return names;
+}
+
+/**
+ * `dw.dataobject = ls_dw`, `= c_dw_orders`, `= gnv_const.c_dw_orders`,
+ * `= ds_in.dataobject`: a DataWindow named by something other than a literal.
+ *
+ * When the file itself assigns a DataWindow name to that variable or constant
+ * (`ls_dw = 'd_x'`, `constant string c_dw = 'd_x'`, `ds_in.dataobject =
+ * 'd_x'`), those are the DataWindows. Otherwise the reference is left for the
+ * resolver (`dataobject:` + the receiver path, typed as for calls), which reads
+ * the constant another object declares or the DataWindow the receiver's type
+ * sets: that is how a dialog that shows whatever DataWindow its datastore
+ * parameter holds links to it.
+ */
+function handleDataObjectAssignment(stmt: SyntaxNode, fn: Node, owner: Node | null, st: FileState): void {
+  const { source } = st.ctx;
+  const target = child(stmt, 'l_value')?.namedChildren[0];
+  const field = target?.type === 'field_access' ? child(target, 'field_name') : null;
+  if (!field || getNodeText(field, source).trim().toLowerCase() !== 'dataobject') return;
+  const value = child(stmt, 'r_value')?.namedChildren[0];
+  const expression = value?.type === 'l_value_expression' ? value.namedChildren[0] : undefined;
+  if (!expression) return; // a literal is read by linkDataObjects; a call or a concatenation is not followed
+
+  const written = getNodeText(expression, source).trim().replace(/\s+/g, '');
+  const last = expression.type === 'field_access' ? getNodeText(child(expression, 'field_name') ?? expression, source).trim() : written;
+  if (expression.type !== 'identifier_expression' && expression.type !== 'field_access') return;
+
+  const literals = literalsAssignedTo(written, source);
+  if (literals.length === 0 && expression.type === 'field_access' && last.toLowerCase() !== 'dataobject') literals.push(...literalsAssignedTo(last, source));
+  if (literals.length > 0) {
+    for (const name of literals) addRef(st, fn.id, name, 'references', stmt);
+    return;
+  }
+  const path = receiverPath(expression, owner, st);
+  if (path && path !== UNTYPED_RECEIVER && !path.includes(UNTYPED_RECEIVER)) addRef(st, fn.id, DATAOBJECT_REF + path, 'references', stmt);
+}
+
 function walkBody(node: SyntaxNode, fn: Node, owner: Node | null, st: FileState): void {
   for (const c of node.namedChildren) {
     switch (c.type) {
@@ -583,6 +639,9 @@ function walkBody(node: SyntaxNode, fn: Node, owner: Node | null, st: FileState)
         break;
       case 'create_statement':
         handleCreate(c, fn, st);
+        break;
+      case 'assignment_statement':
+        handleDataObjectAssignment(c, fn, owner, st);
         break;
       case 'local_variable_declaration': {
         const type = child(c, 'variable_type');
@@ -654,6 +713,8 @@ function extractFile(root: SyntaxNode, ctx: ExtractorContext): void {
         break;
     }
   }
+  linkDataObjects(st);
+  linkReportHeader(st);
   // A user event declared on a type but given no script here is still a
   // member descendants override and callers fire (`dw.event pfc_retrieve()`).
   for (const { owner, decl } of st.declaredEvents.values()) {
@@ -664,6 +725,115 @@ function extractFile(root: SyntaxNode, ctx: ExtractorContext): void {
       decorators: ['event'],
     });
   }
+}
+
+/**
+ * Link each script and control that names a DataWindow by a literal to it, from
+ * the narrowest symbol around the mention: the function or event it is written
+ * in, or the control whose type block holds it. The DataWindow itself is read
+ * from its `.srd` (see DataWindowExtractor); the resolver finds it by name.
+ */
+function linkDataObjects(st: FileState): void {
+  const { source } = st.ctx;
+  if (!/dataobject/i.test(source)) return;
+  const lineStarts = [0];
+  for (let i = source.indexOf('\n'); i >= 0; i = source.indexOf('\n', i + 1)) lineStarts.push(i + 1);
+  const lineAt = (index: number): number => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid]! <= index) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+
+  const seen = new Set<string>();
+  for (const m of source.matchAll(DATAOBJECT_RE)) {
+    const line = lineAt(m.index!);
+    const lineStart = lineStarts[line - 1]!;
+    if (source.slice(lineStart, m.index).includes('//')) continue; // commented out
+    let owner: Node | undefined;
+    for (const n of st.ctx.nodes) {
+      if (n.kind === 'file' || n.startLine > line || n.endLine < line) continue;
+      if (!owner || n.endLine - n.startLine <= owner.endLine - owner.startLine) owner = n;
+    }
+    const from = owner ?? st.main;
+    if (!from) continue;
+    const key = `${from.id}\0${m[2]!.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    st.ctx.addUnresolvedReference({
+      fromNodeId: from.id,
+      referenceName: m[2]!,
+      referenceKind: 'references',
+      line,
+      column: m.index! - lineStart,
+    });
+  }
+}
+
+// --- A report's documentation header --------------------------------------
+
+/** `Datawindow : d_x`, `Report : XCODE description`: a field of a report script's header comment. */
+const HEADER_FIELD_RE = /^\s*(?:\/\*+\s*)?([A-Za-z][A-Za-z. ]{1,24}?)\s*:\s*(.*)$/;
+const HEADER_FIELDS = new Set(['version', 'date', 'report', 'filename', 'datawindow', 'author', 'comment', 'ref.', 'changes', 'object', 'description']);
+/** Where the header ends and the script's own SQL begins. */
+const HEADER_END_RE = /^\s*(?:\/\*+\s*)?(?:select|insert|update|delete|create|alter|drop|declare|with|begin|exec|merge|truncate)\b|ScriptEnvelope End|^\s*end\s+(?:subroutine|function)\b/i;
+/** The most lines after the function header that are read as its documentation. */
+const HEADER_MAX_LINES = 70;
+const HEADER_MAX_CHARS = 2000;
+
+/** PowerBuilder writes a character outside ASCII as `$$HEX1$$fc00$$ENDHEX$$` (UTF-16 units, little-endian). */
+function decodeHexEscapes(text: string): string {
+  return text.replace(/\$\$HEX\d+\$\$([0-9a-fA-F]+)\$\$ENDHEX\$\$/g, (_m, hex: string) =>
+    (hex.match(/.{4}/g) ?? []).map((unit) => String.fromCharCode(parseInt(unit.slice(2, 4) + unit.slice(0, 2), 16))).join(''));
+}
+
+/**
+ * A report's SQL lives in a global function (`x_am_intaxbau_sql.srf`) whose body
+ * is a comment: a header that names the report code, the DataWindow(s) it
+ * belongs to, who wrote it, and what changed. Reports are started by name from
+ * a catalog in the database, so this header is the only place the project says
+ * which DataWindow a report is. It becomes the function's documentation, so a
+ * report code is searchable, and each DataWindow it names (the main one and
+ * its nested parts, one per line) is linked from the function.
+ */
+function linkReportHeader(st: FileState): void {
+  if (!/\.srf$/i.test(st.ctx.filePath)) return;
+  const fn = st.ctx.nodes.find((n) => n.kind === 'function' && n.filePath === st.ctx.filePath);
+  if (!fn) return;
+  const lines = st.ctx.source.split(/\r?\n/).slice(fn.startLine - 1, fn.startLine - 1 + HEADER_MAX_LINES);
+  const fields = new Map<string, Array<{ text: string; line: number }>>();
+  const header: string[] = [];
+  let current: string | undefined;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (HEADER_END_RE.test(line)) break;
+    const field = HEADER_FIELD_RE.exec(line);
+    const key = field?.[1]!.trim().toLowerCase();
+    if (field && key && HEADER_FIELDS.has(key)) {
+      current = key;
+      fields.set(key, [{ text: field[2]!.trim(), line: fn.startLine + i }]);
+    } else if (current && line.trim() && !/^\s*\/?\*+\/?\s*$/.test(line)) {
+      fields.get(current)!.push({ text: line.trim(), line: fn.startLine + i });
+    }
+    const cleaned = line.replace(/^\s*\/\*+\s*/, '').trimEnd();
+    if (cleaned.trim()) header.push(cleaned.trim());
+  }
+  const dataWindows = fields.get('datawindow');
+  if (!dataWindows && !fields.has('report')) return; // a readme, or a script with no header
+
+  const seen = new Set<string>();
+  for (const { text, line } of dataWindows ?? []) {
+    // The first word of each line, when it is a DataWindow's name (they all carry an underscore); a note after it is prose.
+    const name = /^[A-Za-z_][\w$#%-]*/.exec(text)?.[0];
+    if (!name || !name.includes('_') || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    st.ctx.addUnresolvedReference({ fromNodeId: fn.id, referenceName: name, referenceKind: 'references', line, column: 0 });
+  }
+  fn.docstring = decodeHexEscapes(header.join('\n')).slice(0, HEADER_MAX_CHARS);
 }
 
 export const powerbuilderExtractor: LanguageExtractor = {

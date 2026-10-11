@@ -206,8 +206,8 @@ describe('Language Detection', () => {
     expect(detectLanguage('main.pbl/m_main.srm')).toBe('powerbuilder');
     expect(detectLanguage('main.pbl/f_util.srf')).toBe('powerbuilder');
     expect(detectLanguage('main.pbl/s_data.srs')).toBe('powerbuilder');
-    // A DataWindow is not PowerScript.
-    expect(detectLanguage('main.pbl/d_list.srd')).toBe('unknown');
+    // A DataWindow is not PowerScript, but it is a PowerBuilder source with its own extractor.
+    expect(detectLanguage('main.pbl/d_list.srd')).toBe('powerbuilder');
   });
 
   it('should detect Solidity files', () => {

@@ -31,6 +31,7 @@ import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
 import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
+import { DataWindowExtractor } from './datawindow-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
 import { CfmlExtractor } from './cfml-extractor';
@@ -8323,6 +8324,11 @@ export function extractFromSource(
   ) {
     // Use custom extractor for DFM/FMX form files
     const extractor = new DfmExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'powerbuilder' && fileExtension === '.srd') {
+    // Use custom extractor for DataWindow objects (columns, retrieve SQL, nested
+    // reports and drop-down DataWindows); the layout is not PowerScript.
+    const extractor = new DataWindowExtractor(filePath, source);
     result = extractor.extract();
   } else {
     // Native-kernel route (docs/design/rust-kernel-migration-plan.md): gated
